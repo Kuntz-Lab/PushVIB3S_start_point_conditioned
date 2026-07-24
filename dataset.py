@@ -5,7 +5,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from bps import get_random_basis, encode_pcd_with_bps, normalize
 
-from push_utils import *
+from utils import *
 
 class PushDataset(Dataset):
     def __init__(self, data_dir="processed_data/", bps_dir="bps/", use_directional_bps=True, deterministic_farthest_point_sampling=False):
