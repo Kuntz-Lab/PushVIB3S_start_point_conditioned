@@ -107,7 +107,7 @@ class PushVibesTrainer:
             goalD=self.goalD,
             feature_dim=self.feature_dim,
             deterministic=self.deterministic,
-            use_directional_bps=True  # Explicitly set to use directional BPS
+            use_directional_bps=self.use_directional_bps
         ).to(self.device)
         self.l2_loss = nn.MSELoss()
 
@@ -129,7 +129,7 @@ class PushVibesTrainer:
         # Split sim dataset into train and validation
         full_dataset = PushDataset(
             data_dir=self.sim_data_dir,
-            use_directional_bps=True  # Set to True to use directional BPS
+            use_directional_bps=self.use_directional_bps
         )
 
         # Use 90% for training, 10% for validation
@@ -157,12 +157,12 @@ class PushVibesTrainer:
         # if self.pretrained_weights_path is not None or self.sim_data_pts_per_epoch == 0:
         self.real_train_dataset = PushDataset(
             data_dir=self.real_data_dir,
-            use_directional_bps=True
+            use_directional_bps=self.use_directional_bps
         )
 
         self.real_val_dataset = PushDataset(
             data_dir=self.validation_data_dir,
-            use_directional_bps=True,
+            use_directional_bps=self.use_directional_bps,
             deterministic_farthest_point_sampling=True  # Ensure deterministic sampling for validation
         )
 
@@ -261,14 +261,14 @@ class PushVibesTrainer:
             json.dump(config, f, indent=2, sort_keys=True)
 
 
-    def save_checkpoint(self, epoch: int, loss: float, is_best: bool) -> Path | None:
+    def save_checkpoint(self, epoch: int, loss: float, is_best: bool, force_save: bool = False) -> Path | None:
         path = self.checkpoint_dir / f'checkpoint_{epoch}_{loss:.6f}.pt'
 
         # Always save the latest weights (overwriting each time)
         torch.save(self.model.state_dict(), self.checkpoint_dir / 'latest_model_weights.pt')
 
-        if is_best:
-            # Save the best weights using the epoch/loss path
+        if is_best or force_save:
+            # Save the numbered checkpoint (best-so-far, or explicitly forced e.g. epoch -1)
             torch.save(self.model.state_dict(), path)
             return path
 
@@ -481,18 +481,19 @@ class PushVibesTrainer:
         min_delta = 1e-6
         use_sim_for_best = self.sim_validation and self.sim_data_pts_per_epoch == -1 and self.real_data_pts_per_epoch == 0
         # beta_goal is 0 during these epochs (see the schedule below), so their val loss has
-        # no KL term and isn't comparable to post-warmup losses. Best-weight tracking is
-        # deferred until beta_goal reaches its target value, so an artificially low
-        # pre-KL loss can never lock out every epoch that follows it.
+        # no KL term and isn't comparable to post-warmup losses. Best-weight tracking and the
+        # LR scheduler are both deferred until beta_goal reaches its target value, so an
+        # artificially low pre-KL loss can't lock out every epoch that follows it, or make
+        # the scheduler think training regressed the moment the KL term switches on.
         kl_warmup_epochs = 3
 
         self.beta_goal = 0.0
         initial_eval = self.evaluate_current_weights("Initial evaluation")
         _initial_best_val_loss, initial_checkpoint_loss = self._checkpoint_metrics(initial_eval, use_sim_for_best)
-        self.scheduler.step(initial_eval["real"]["total_loss"])
 
-        # Pre-training, beta_goal=0 eval is never eligible to be "best" for the same reason.
-        self.save_checkpoint(-1, initial_checkpoint_loss, False)
+        # Pre-training, beta_goal=0 eval is never eligible to be "best" or to seed the LR
+        # scheduler, for the same reason -- but it's always persisted to disk as a reference.
+        self.save_checkpoint(-1, initial_checkpoint_loss, False, force_save=True)
 
         save_val_error_plot(
             self.sim_val_error_history,
@@ -523,8 +524,11 @@ class PushVibesTrainer:
             eval_results = self.evaluate_current_weights(f"Epoch {epoch}")
             best_epoch_val_loss, checkpoint_loss = self._checkpoint_metrics(eval_results, use_sim_for_best)
 
-            # Scheduler step with validation loss
-            self.scheduler.step(eval_results["real"]["total_loss"])
+            # Scheduler step with validation loss. Only fed post-warmup losses: its internal
+            # "best" is seeded by the first .step() call, so stepping during warmup would
+            # anchor it to a pre-KL loss and read the epoch-3 KL jump as regression.
+            if epoch >= kl_warmup_epochs:
+                self.scheduler.step(eval_results["real"]["total_loss"])
 
             # Check for improvement. Epochs before the KL term is fully active are never
             # eligible to be "best" (see kl_warmup_epochs above); the first post-warmup

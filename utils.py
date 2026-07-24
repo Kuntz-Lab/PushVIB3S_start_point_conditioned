@@ -15,6 +15,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from bps import normalize, denormalize_torch
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
@@ -912,65 +914,7 @@ def find_pickle_files(data_dir):
     return file_list
 
 
-def normalize(x, known_scalers=False, x_mean=None, x_max=None, max_rescale=True, return_scalers=False):
-    """
-    Normalize a batch of point clouds to fit inside a unit sphere (center at the mean,
-    scale by the max distance from that center).
-
-    Args:
-        x (np.ndarray): [n_clouds, n_points, n_dims] input point clouds
-        known_scalers (bool): if True, use the provided x_mean/x_max instead of computing them
-        x_mean (np.ndarray or None): [n_clouds, n_dims] mean to subtract per cloud (required if known_scalers=True)
-        x_max (np.ndarray or None): [n_clouds, 1] max norm to divide by per cloud (required if known_scalers=True)
-        max_rescale (bool): if False, only center the cloud (skip dividing by x_max)
-        return_scalers (bool): whether to also return the x_mean/x_max used
-
-    Returns:
-        x_norm (np.ndarray): [n_clouds, n_points, n_dims] normalized point clouds
-        x_mean (np.ndarray): [n_clouds, n_dims] mean used per cloud (only if return_scalers=True)
-        x_max (np.ndarray): [n_clouds, 1] max norm used per cloud (only if return_scalers=True)
-    """
-
-    def _normalize_cloud(cloud, mean=None, max_norm=None, max_rescale=True):
-        if mean is None:
-            mean = np.mean(cloud, axis=0)
-
-        cloud_norm = np.copy(cloud - mean)
-
-        if max_norm is None:
-            max_norm = np.max(np.sqrt(np.sum(np.square(cloud), axis=1))) if max_rescale else 1.0
-        cloud_norm = cloud_norm / max_norm
-
-        return cloud_norm, mean, max_norm
-
-    n_clouds, n_points, n_dims = x.shape
-    x_norm = np.zeros([n_clouds, n_points, n_dims])
-
-    if not known_scalers:
-        x_mean = np.zeros([n_clouds, n_dims])
-        x_max = np.zeros([n_clouds, 1])
-
-    for pid in range(n_clouds):
-        if not known_scalers:
-            x_norm[pid], x_mean[pid], x_max[pid] = _normalize_cloud(x[pid], max_rescale=max_rescale)
-        else:
-            x_norm[pid], _, _ = _normalize_cloud(x[pid], x_mean[pid], x_max[pid], max_rescale=max_rescale)
-
-    if return_scalers:
-        return x_norm, x_mean, x_max
-    return x_norm
-
-
-def denormalize_torch(x_norm, x_mean, x_max):
-    """
-    Inverse of normalize(), using torch tensors so it stays differentiable in the model's forward pass.
-
-    Args:
-        x_norm (torch.Tensor): [batch, ..., n_dims] normalized values (e.g. predicted points)
-        x_mean (torch.Tensor): [batch, n_dims] mean that was subtracted during normalization
-        x_max (torch.Tensor): [batch, 1] max norm that was divided out during normalization
-
-    Returns:
-        torch.Tensor: [batch, ..., n_dims] denormalized values
-    """
-    return x_norm * x_max + x_mean
+# normalize() and denormalize_torch() live in bps.py (imported at the top of this file) --
+# kept as a single source of truth rather than duplicated here, since dataset.py imports
+# normalize from both modules and a wildcard `from utils import *` would otherwise silently
+# shadow bps.py's copy with a second, independently-maintained implementation.
