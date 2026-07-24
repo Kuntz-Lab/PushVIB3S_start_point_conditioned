@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from bps import denormalize_torch
 
-class PushVIBES(nn.Module):
+class PushVIB3S_start_point_conditioned(nn.Module):
     def __init__(self,
                  n_neurons=512,
                  in_bps=512,         # dimension of basis point set encoding
@@ -15,7 +15,7 @@ class PushVIBES(nn.Module):
                  use_directional_bps=False,
                  deterministic=False,
                  ):
-        super(PushVIBES, self).__init__()
+        super(PushVIB3S_start_point_conditioned, self).__init__()
         
         print(f"[PushVIBES __init__] Received parameters: in_bps={in_bps}, use_directional_bps={use_directional_bps}")
 
@@ -72,6 +72,8 @@ class PushVIBES(nn.Module):
             ResBlock(n_neurons, feature_dim)
         )
 
+        self.start_point_proj = nn.Sequential(nn.Linear(3, feature_dim), nn.ReLU())
+
        # Prediction MLP
         self.mlp = nn.Sequential(
             nn.Linear(feature_dim*2, 256),
@@ -84,8 +86,7 @@ class PushVIBES(nn.Module):
         )
         
         # Prediction heads
-        self.start_point_head = nn.Linear(128, 3)  # xyz coordinates
-        self.displacement_head = nn.Linear(128, 3)  # xyz displacement
+        self.end_point_head = nn.Linear(128, 3)  # xyz end point (normalized)
         print(f"[PushVIBES __init__] Model initialization complete.")
 
     def encode_goal(self, goal_bps):
@@ -97,12 +98,12 @@ class PushVIBES(nn.Module):
         logvar = torch.clamp(self.goal_logvar(hidden_goal), min=-20, max=2)
         return mu, logvar, goal_feature_target
 
-    def decode_goal(self, z_goal):
-        """Decode z_goal into a goal feature representation."""
+    def project_goal(self, z_goal):
+        """Project z_goal into a goal feature representation."""
         return self.goal_decoder(z_goal)
 
 
-    def forward(self, start_bps, goal_bps, x_mean=None, x_max=None):
+    def forward(self, start_bps, goal_bps, start_point, x_mean=None, x_max=None):
         # Remove any extra dimensions
         if start_bps.dim() > 2:
             start_bps = start_bps.squeeze(1)
@@ -132,17 +133,17 @@ class PushVIBES(nn.Module):
             z_goal = q_z_goal.rsample()
 
         # Decode goal features for reconstruction
-        goal_recon = self.decode_goal(z_goal)
+        goal_feature = self.project_goal(z_goal)
 
         start_feature = self.start_encoder(start_bps)
+        start_point_feat = self.start_point_proj(start_point)  # [batch, feature_dim]
 
         # Concatenate the reconstructed goal with the start BPS
-        combined_input = torch.cat([start_feature, goal_recon], dim=1)
+        combined_input = torch.cat([start_feature, goal_feature, start_point_feat], dim=1)  # [batch, feature_dim*3]
 
         # Pass through the MLP to predict start point and displacement
         mlp_output = self.mlp(combined_input)
-        start_point = self.start_point_head(mlp_output)
-        displacement = self.displacement_head(mlp_output)
+        end_point = self.end_point_head(mlp_output)  # [batch, 3], normalized
 
         # Denormalize the start point and displacement (BPS)
 
@@ -157,8 +158,7 @@ class PushVIBES(nn.Module):
         if x_max.dim() > 2:
             x_max = x_max.squeeze(1)
 
-        start_point_final = denormalize_torch(start_point, x_mean, x_max)
-        displacement_final = displacement * x_max  # Scale displacement by x_max
+        end_point_final = denormalize_torch(end_point, x_mean, x_max)
 
         # Compute KL divergence
         if self.deterministic:
@@ -167,15 +167,13 @@ class PushVIBES(nn.Module):
             kl_goal = -0.5 * torch.mean(torch.sum(1 + goal_logvar - goal_mu.pow(2) - goal_logvar.exp(), dim=1))
 
         return {
-            "start_point": start_point_final,
-            "start_point_normalized": start_point,
-            "displacement": displacement_final,
-            "displacement_normalized": displacement,
-            "goal_mu": goal_mu,
-            "goal_logvar": goal_logvar,
-            "kl_goal": kl_goal,
-            "latent_goal": z_goal,
-        }
+                    "end_point": end_point_final,
+                    "normalized_end_point": end_point,
+                    "goal_mu": goal_mu,
+                    "goal_logvar": goal_logvar,
+                    "kl_goal": kl_goal,
+                    "latent_goal": z_goal,
+                }
 
 
 class ResBlock(nn.Module):
