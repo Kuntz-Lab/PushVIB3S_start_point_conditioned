@@ -499,7 +499,7 @@ def objectframeize_goal_pc(goal_pc, rotation_matrix, tissue_mean):
 
 
 
-def visualize_action_prediction(start_point, end_points, start_pc, goal_pc, gt_end_point=None, visualize_origin=False, object_frame_visualization=True):
+def visualize_action_prediction(start_point, end_points, start_pc=None, goal_pc=None, gt_end_point=None, visualize_origin=False, object_frame_visualization=True):
     """
     Visualize a push/grasp prediction: start and goal point clouds, a line from start to each
     predicted end point, and a cone arrowhead at each end point tip.
@@ -507,28 +507,32 @@ def visualize_action_prediction(start_point, end_points, start_pc, goal_pc, gt_e
     Args:
         start_point (np.ndarray): (3,) push start position in world coordinates
         end_points: (3,) array or list of (3,) arrays — predicted end positions
-        start_pc (np.ndarray): (N, 3) start point cloud
-        goal_pc (np.ndarray): (N, 3) goal point cloud
-        gt_end_point (np.ndarray, optional): (3,) ground truth end position
+        start_pc (np.ndarray, optional): (N, 3) start point cloud; omitted if None
+        goal_pc (np.ndarray, optional): (N, 3) goal point cloud; omitted if None
+        gt_end_point (np.ndarray, optional): (3,) ground truth end position; omitted if None
     """
     if isinstance(end_points, np.ndarray) and end_points.ndim == 1:
         end_points = [end_points]
 
     start_point = np.asarray(start_point).reshape(3)
 
-    start_pcd = o3d.geometry.PointCloud()
-    start_pcd.points = o3d.utility.Vector3dVector(start_pc)
-    start_pcd.paint_uniform_color([1, 0, 0])
-
-    goal_pcd = o3d.geometry.PointCloud()
-    goal_pcd.points = o3d.utility.Vector3dVector(goal_pc)
-    goal_pcd.paint_uniform_color([0, 0, 1])
-
     start_sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.001)
     start_sphere.translate(start_point)
     start_sphere.paint_uniform_color([1, 0, 0])
 
-    geometries = [start_pcd, goal_pcd, start_sphere]
+    geometries = [start_sphere]
+
+    if start_pc is not None:
+        start_pcd = o3d.geometry.PointCloud()
+        start_pcd.points = o3d.utility.Vector3dVector(start_pc)
+        start_pcd.paint_uniform_color([1, 0, 0])
+        geometries.append(start_pcd)
+
+    if goal_pc is not None:
+        goal_pcd = o3d.geometry.PointCloud()
+        goal_pcd.points = o3d.utility.Vector3dVector(goal_pc)
+        goal_pcd.paint_uniform_color([0, 0, 1])
+        geometries.append(goal_pcd)
 
     cone_radius = 0.001
     cone_height = 0.003

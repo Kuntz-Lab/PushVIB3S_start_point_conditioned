@@ -233,6 +233,58 @@ class PushVIB3S_start_point_conditioned(nn.Module):
 
         return end_points_world.view(B, num_samples, 3)
 
+    def sample_from_prior(self, start_bps, start_point, x_mean, x_max, num_samples=100):
+        """Sample end points from the prior distribution p(z_goal) = N(0, I), vectorized.
+
+        Draws num_samples latent codes directly from the standard normal prior (no goal
+        conditioning), then processes all samples in a single batched forward pass through
+        the decoder and MLP. Mirrors sample_from_posterior but skips encode_goal entirely.
+
+        Args:
+            start_bps (torch.Tensor): [B, in_bps] start BPS encoding
+            start_point (torch.Tensor): [B, 3] normalized start point
+            x_mean (torch.Tensor): [B, 3] normalization mean
+            x_max (torch.Tensor): [B, 1] normalization max norm
+            num_samples (int): number of prior samples to draw per batch item
+
+        Returns:
+            torch.Tensor: [B, num_samples, 3] denormalized end points
+        """
+        if start_bps.dim() > 2:
+            start_bps = start_bps.squeeze(1)
+
+        if x_mean.dtype != torch.float32:
+            x_mean = x_mean.to(torch.float32)
+            x_max = x_max.to(torch.float32)
+        if x_mean.dim() > 2:
+            x_mean = x_mean.squeeze(1)
+        if x_max.dim() > 2:
+            x_max = x_max.squeeze(1)
+
+        B = start_bps.shape[0]
+
+        start_feature = self.encode_start(start_bps)                # (B, feature_dim)
+        start_point_feat = self.start_point_proj(start_point)       # (B, feature_dim)
+
+        # Sample num_samples z_goal vectors per batch item directly from the standard
+        # normal prior (no posterior mean/std -- unconditional on the goal): (B, num_samples, goalD)
+        z_goals = torch.randn(B, num_samples, self.goalD, device=start_feature.device, dtype=start_feature.dtype)
+
+        # Flatten to (B * num_samples, ...) for a single batched pass
+        z_goals_flat = z_goals.view(B * num_samples, self.goalD)
+        goal_features_flat = self.project_goal(z_goals_flat)                      # (B*S, feature_dim)
+        start_feature_flat = start_feature.repeat_interleave(num_samples, dim=0)  # (B*S, feature_dim)
+        start_point_flat   = start_point_feat.repeat_interleave(num_samples, dim=0)
+
+        combined = torch.cat([start_feature_flat, goal_features_flat, start_point_flat], dim=1)
+        end_points_norm = self.end_point_head(self.mlp(combined))   # (B*S, 3)
+
+        x_mean_flat = x_mean.repeat_interleave(num_samples, dim=0)  # (B*S, 3)
+        x_max_flat  = x_max.repeat_interleave(num_samples, dim=0)   # (B*S, 1)
+        end_points_world = denormalize_torch(end_points_norm, x_mean_flat, x_max_flat)
+
+        return end_points_world.view(B, num_samples, 3)
+
 
 class ResBlock(nn.Module):
     def __init__(self, in_channels, out_channels):

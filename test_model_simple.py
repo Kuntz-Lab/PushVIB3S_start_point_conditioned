@@ -11,10 +11,12 @@ if __name__ == "__main__":
     seed = 333
     set_seed(seed)
 
-    dataset_path = "/home/britton/data/pushvibes_eval_focal_lesion/object_frame/test"
-    # weights_path = "/home/britton/PushVIBES_evolution/checkpoints/2pt5klocal_20260711_203611/checkpoint_381_0.049032.pt"  # beta 0.00001
-    # weights_path = "/home/britton/PushVIBES_evolution/checkpoints/2pt5klocal_20260713_091743/checkpoint_283_0.054858.pt" # beta 0.005
-    weights_path = "/home/britton/PushVIBES_evolution/checkpoints/2pt5klocal_20260712_001825/checkpoint_184_0.053201.pt" # beta 0.001
+    dataset_path = "/home/britton/PushVIBES/data/all_good_realsense_data/test"
+
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.08local_20260724_142009/checkpoint_200_0.035985.pt" #
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/checkpoint_-1_0.031510.pt"
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/latest_model_weights.pt"
+    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.005local_20260724_153206/checkpoint_280_0.030861.pt"
 
     deterministic_farthest_point_sampling = True
     n_neurons = 512
@@ -70,14 +72,27 @@ if __name__ == "__main__":
             gt_end_point = data['end_point'].squeeze(0)                      # (3,)
 
             if visualize_distribution:
-                sampled = model.sample_from_posterior(
+                sampled_prior = model.sample_from_prior(
+                    start_bps, start_point,
+                    x_mean=x_mean, x_max=x_max,
+                    num_samples=n_distribution_samples,
+                )  # (1, n_distribution_samples, 3)
+                visualize_action_prediction(
+                    start_point=data['start_point'].squeeze(0),
+                    end_points=list(sampled_prior.squeeze(0).cpu().numpy()),
+                    start_pc=data['start_pc_unnormalized'],
+                    goal_pc=None,
+                    gt_end_point=None,
+                )
+
+                sampled_posterior = model.sample_from_posterior(
                     start_bps, goal_bps, start_point=start_point,
                     x_mean=x_mean, x_max=x_max,
                     num_samples=n_distribution_samples,
                 )  # (1, n_distribution_samples, 3)
                 visualize_action_prediction(
                     start_point=data['start_point'].squeeze(0),
-                    end_points=list(sampled.squeeze(0).cpu().numpy()),
+                    end_points=list(sampled_posterior.squeeze(0).cpu().numpy()),
                     start_pc=data['start_pc_unnormalized'],
                     goal_pc=data['goal_pc_unnormalized'],
                     gt_end_point=gt_end_point,

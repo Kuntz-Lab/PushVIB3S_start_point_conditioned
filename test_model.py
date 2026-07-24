@@ -6,7 +6,7 @@ import torch.nn as nn
 import random
 import csv
 
-from utils import set_seed, save_weight_comparison_boxplot, denormalize_torch
+from utils import set_seed, save_weight_comparison_boxplot
 
 
 def load_weights(model, weight_path, device):
@@ -24,33 +24,12 @@ def load_weights(model, weight_path, device):
 
 def sample_and_visualize(model, start_bps, start_point, x_mean, x_max, n_samples=1000):
     """Sample end points from the prior p(z_goal) = N(0, I), vectorized."""
-    if x_mean.dtype != torch.float32:
-        x_mean = x_mean.to(torch.float32)
-        x_max = x_max.to(torch.float32)
-
-    B = start_bps.shape[0]
-    device = start_bps.device
-
-    start_feature = model.encode_start(start_bps)             # (B, feature_dim)
-    start_point_feat = model.start_point_proj(start_point)    # (B, feature_dim)
-
-    z_goals = torch.randn(B, n_samples, model.goalD, device=device)
-    z_goals_flat = z_goals.view(B * n_samples, model.goalD)
-
-    goal_features_flat = model.project_goal(z_goals_flat)                       # (B*S, feature_dim)
-    start_feature_flat = start_feature.repeat_interleave(n_samples, dim=0)      # (B*S, feature_dim)
-    start_point_flat = start_point_feat.repeat_interleave(n_samples, dim=0)     # (B*S, feature_dim)
-
-    combined = torch.cat([start_feature_flat, goal_features_flat, start_point_flat], dim=1)
-    end_points_norm = model.end_point_head(model.mlp(combined))   # (B*S, 3)
-
-    x_mean_flat = x_mean.repeat_interleave(n_samples, dim=0)
-    x_max_flat = x_max.repeat_interleave(n_samples, dim=0)
-    end_points_world = denormalize_torch(end_points_norm, x_mean_flat, x_max_flat)
+    end_points_world = model.sample_from_prior(
+        start_bps, start_point, x_mean, x_max, num_samples=n_samples
+    )  # (B, n_samples, 3)
 
     predictions = {
-        'end_point': end_points_world.view(B, n_samples, 3).cpu().numpy(),
-        'normalized_end_point': end_points_norm.view(B, n_samples, 3).cpu().numpy(),
+        'end_point': end_points_world.cpu().numpy(),
     }
 
     return predictions

@@ -587,7 +587,7 @@ def main() -> None:
     # Set random seed
     set_seed(333)
 
-    run_name_prefix = "realsense_bg0.08"
+    run_name_prefix = "realsense_bg0.0005_weight1.5"
     if run_name_prefix is None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
@@ -597,7 +597,7 @@ def main() -> None:
         in_bps=128,
         goalD=7,  # 2, 7
         feature_dim=128,
-        beta_goal=0.08, # 0.00001 was used for sim only training
+        beta_goal=0.0005, # 0.00001 was used for sim only training
         batch_size=64, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
         learning_rate=5e-5, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
         num_epochs=600, # 350 usually sufficient for fine/co-training
@@ -613,7 +613,7 @@ def main() -> None:
         pretrained_weights_path=None, # Set to None to train from scratch
         sim_data_pts_per_epoch=612, # 561
         real_data_pts_per_epoch=-1, # 561, -1 is all
-        real_loss_weight=1.0,
+        real_loss_weight=1.5,
         run_name_prefix=run_name_prefix
     )
     trainer.train()
