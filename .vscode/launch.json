@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File (HandoffCVAE)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "python": "/home/britton/miniconda3/envs/HandoffCVAE/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: train.py (HandoffCVAE)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train.py",
+            "python": "/home/britton/miniconda3/envs/HandoffCVAE/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

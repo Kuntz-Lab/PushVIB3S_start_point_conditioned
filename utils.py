@@ -288,8 +288,12 @@ def save_pickle_data(data, file_path):
 
 
 def save_val_error_plot(sim_val_error_history, real_val_error_history, checkpoint_dir, epoch):
-    real_epochs = list(range(1, len(real_val_error_history["total"]) + 1))
-    sim_epochs = list(range(1, len(sim_val_error_history["total"]) + 1))
+    """Plot per-epoch validation error: mean Euclidean distance between the predicted and
+    ground-truth end point (real-world units, converted from meters to cm for readability)."""
+    m_to_cm = 100.0
+
+    real_epochs = list(range(1, len(real_val_error_history["end_point"]) + 1))
+    sim_epochs = list(range(1, len(sim_val_error_history["end_point"]) + 1))
 
     plt.figure(figsize=(10, 6))
 
@@ -297,15 +301,15 @@ def save_val_error_plot(sim_val_error_history, real_val_error_history, checkpoin
     real_color = "tab:orange"
 
     if sim_epochs:
-        plt.plot(sim_epochs, sim_val_error_history["total"], color=sim_color, linestyle="-", label="sim total")
-        plt.plot(sim_epochs, sim_val_error_history["end_point"], color=sim_color, linestyle="--", label="sim end point")
+        sim_errors_cm = [e * m_to_cm for e in sim_val_error_history["end_point"]]
+        plt.plot(sim_epochs, sim_errors_cm, color=sim_color, linestyle="-", label="sim end point error")
 
-    plt.plot(real_epochs, real_val_error_history["total"], color=real_color, linestyle="-", label="real total")
-    plt.plot(real_epochs, real_val_error_history["end_point"], color=real_color, linestyle="--", label="real end point")
+    real_errors_cm = [e * m_to_cm for e in real_val_error_history["end_point"]]
+    plt.plot(real_epochs, real_errors_cm, color=real_color, linestyle="-", label="real end point error")
 
     plt.xlabel("Epoch")
-    plt.ylabel("Validation Error")
-    plt.title("Validation Error Curves")
+    plt.ylabel("Mean End Point Error (cm)")
+    plt.title("Validation Error: Mean Distance Between Predicted and Ground-Truth End Point")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
@@ -346,25 +350,22 @@ def save_val_loss_plot(sim_val_loss_history, real_val_loss_history, checkpoint_d
 
 
 def save_weight_comparison_boxplot(results_rows, output_path):
-    real_start_plot_data = []
-    real_displacement_plot_data = []
+    real_end_point_plot_data = []
     labels = []
 
     for row in results_rows:
-        real_start_errors = np.asarray(row.get("real_start_point_errors", []), dtype=float)
-        real_displacement_errors = np.asarray(row.get("real_displacement_errors", []), dtype=float)
+        real_end_point_errors = np.asarray(row.get("real_end_point_errors", []), dtype=float)
 
-        if real_start_errors.size == 0 or real_displacement_errors.size == 0:
+        if real_end_point_errors.size == 0:
             continue
 
         labels.append(row["model_name"])
-        real_start_plot_data.append(real_start_errors * 100.0)
-        real_displacement_plot_data.append(real_displacement_errors * 100.0)
+        real_end_point_plot_data.append(real_end_point_errors * 100.0)
 
     if not labels:
         return
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    fig, ax = plt.subplots(figsize=(12, 6))
 
     boxplot_style = dict(
         patch_artist=True,
@@ -375,19 +376,13 @@ def save_weight_comparison_boxplot(results_rows, output_path):
         flierprops={"marker": "o", "markerfacecolor": "#d95f02", "markeredgecolor": "#d95f02", "markersize": 4, "alpha": 0.5},
     )
 
-    axes[0].boxplot(real_start_plot_data, labels=labels, **boxplot_style)
-    axes[0].set_title("Start Point Error for Unseen Real Data")
-    axes[0].set_ylabel("Error (cm)")
-    axes[0].grid(True, axis="y", alpha=0.3)
+    ax.boxplot(real_end_point_plot_data, labels=labels, **boxplot_style)
+    ax.set_title("End Point Error for Unseen Real Data")
+    ax.set_ylabel("Error (cm)")
+    ax.set_xlabel("Weights")
+    ax.grid(True, axis="y", alpha=0.3)
 
-    axes[1].boxplot(real_displacement_plot_data, labels=labels, **boxplot_style)
-    axes[1].set_title("Displacement Error for Unseen Real Data")
-    axes[1].set_ylabel("Error (cm)")
-    axes[1].set_xlabel("Weights")
-    axes[1].grid(True, axis="y", alpha=0.3)
-
-    for ax in axes:
-        plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
+    plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=800, bbox_inches="tight")

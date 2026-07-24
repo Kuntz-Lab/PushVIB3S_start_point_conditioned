@@ -12,8 +12,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Subset
 import itertools
 from tqdm import tqdm
-from PushVIBES import PushVIBES
-from push_dataset import PushDataset
+from PushVIB3S_start_point_conditioned import PushVIB3S_start_point_conditioned
+from dataset import PushDataset
 import pickle
 import torch.multiprocessing as mp
 from typing import Dict, Any
@@ -21,7 +21,7 @@ from typing import Dict, Any
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from push_utils import set_seed, save_val_error_plot, save_val_loss_plot
+from utils import set_seed, save_val_error_plot, save_val_loss_plot
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -32,8 +32,7 @@ def _append_loss_history(history: Dict[str, list], losses: Dict[str, float]) -> 
     """Append one epoch's loss components to history. The "kl" line is the effective
     (beta_goal-scaled) KL loss, i.e. its actual contribution to total_loss."""
     history["total"].append(losses["total_loss"])
-    history["start_point"].append(losses["start_point_loss"])
-    history["displacement"].append(losses["displacement_loss"])
+    history["end_point"].append(losses["end_point_loss"])
     history["kl"].append(losses["kl_loss_effective"])
 
 
@@ -88,21 +87,21 @@ class PushVibesTrainer:
         self.checkpoint_dir = checkpoint_root / self.run_name
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.current_epoch = 1
-        self.sim_val_error_history = {"total": [], "start_point": [], "displacement": []}
-        self.real_val_error_history = {"total": [], "start_point": [], "displacement": []}
-        self.train_loss_history = {"total": [], "start_point": [], "displacement": [], "kl": []}
-        self.sim_val_loss_history = {"total": [], "start_point": [], "displacement": [], "kl": []}
-        self.real_val_loss_history = {"total": [], "start_point": [], "displacement": [], "kl": []}
+        self.sim_val_error_history = {"total": [], "end_point": []}
+        self.real_val_error_history = {"total": [], "end_point": []}
+        self.train_loss_history = {"total": [], "end_point": [], "kl": []}
+        self.sim_val_loss_history = {"total": [], "end_point": [], "kl": []}
+        self.real_val_loss_history = {"total": [], "end_point": [], "kl": []}
         self._save_run_config()
-        
+
         self._init_dataset()
         self._setup()
         self._load_pretrained_weights()
         self._init_optimizer()
 
     def _setup(self) -> None:
-        
-        self.model = PushVIBES(
+
+        self.model = PushVIB3S_start_point_conditioned(
             n_neurons=self.n_neurons,
             in_bps=self.in_bps,  # This is the base BPS dimension
             goalD=self.goalD,
@@ -117,7 +116,7 @@ class PushVibesTrainer:
             self.model.parameters(),
             lr=self.learning_rate
         )
-        
+
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
             mode='min',
@@ -132,7 +131,7 @@ class PushVibesTrainer:
             data_dir=self.sim_data_dir,
             use_directional_bps=True  # Set to True to use directional BPS
         )
-        
+
         # Use 90% for training, 10% for validation
         train_size = int(0.9 * len(full_dataset))
         val_size = len(full_dataset) - train_size
@@ -232,7 +231,7 @@ class PushVibesTrainer:
             logger.warning(
                 "The sum of absolute parameter values is unchanged after loading pretrained weights."
             )
-        
+
 
     def _save_run_config(self) -> None:
         config = {
@@ -278,33 +277,32 @@ class PushVibesTrainer:
 
     def _compute_losses(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Compute (unweighted) loss tensors for one batch, without stepping the optimizer."""
+        start_point_normalized = batch['start_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
+
         results = self.model(
             batch['start_bps'],
             batch['goal_bps'],
+            start_point_normalized,
             x_mean=batch['x_mean'],  # Pass the mean for denormalization
             x_max=batch['x_max']       # Pass the max for denormalization
         )
 
-        # Ensure consistent dimensions for loss calculation (loss is computed in normalized space)
-        pred_start_point = results['start_point_normalized']
-        pred_displacement = results['displacement_normalized']
-        target_start_point = batch['start_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
-        target_displacement = batch['displacement_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
+        # Loss is computed in normalized space
+        pred_end_point = results['normalized_end_point']
+        target_end_point = batch['end_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
 
-        # Reconstruction loss for push action (start point and displacement)
-        start_point_loss = self.l2_loss(pred_start_point, target_start_point)
-        displacement_loss = self.l2_loss(pred_displacement, target_displacement)
+        # Reconstruction loss for the predicted end point
+        end_point_loss = self.l2_loss(pred_end_point, target_end_point)
 
         # KL divergence losses
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
-        total_loss = start_point_loss + displacement_loss + effective_kl_loss
+        total_loss = end_point_loss + effective_kl_loss
 
         return {
             'total_loss': total_loss,
-            'start_point_loss': start_point_loss,
-            'displacement_loss': displacement_loss,
+            'end_point_loss': end_point_loss,
             'kl_loss': kl_loss,
             'kl_loss_effective': effective_kl_loss
         }
@@ -324,13 +322,14 @@ class PushVibesTrainer:
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
 
-        # Per-key metrics: weighted combination for total_loss (matches what's optimized),
-        # plain average of the unweighted components for logging.
+        # Every component is combined with the same per-source weighting used to build
+        # combined_loss, so total_loss == end_point_loss + kl_loss_effective always holds
+        # (rather than mixing a weighted sum for total_loss with a plain average for the
+        # per-component metrics, which only coincidentally match with one active source).
         avg_losses = {
-            k: sum(losses[k].detach().item() for losses in per_source_losses) / len(per_source_losses)
+            k: sum(weight * losses[k].detach().item() for weight, losses in zip(weights, per_source_losses))
             for k in per_source_losses[0]
         }
-        avg_losses['total_loss'] = combined_loss.detach().item()
         return avg_losses
 
     def _run_batches(self, loader, step_fn) -> Dict[str, float]:
@@ -384,46 +383,43 @@ class PushVibesTrainer:
         return {k: v / steps_per_epoch for k, v in totals.items()}
 
     def validation_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
+        start_point_normalized = batch['start_point_normalized'].squeeze(1)
+
         results = self.model(
             batch['start_bps'],
             batch['goal_bps'],
+            start_point_normalized,
             x_mean=batch['x_mean'],  # Pass the mean for denormalization
             x_max=batch['x_max']       # Pass the max for denormalization
         )
 
         # Loss is computed in normalized space, to match train_step
-        pred_start_point_normalized = results['start_point_normalized']
-        pred_displacement_normalized = results['displacement_normalized']
-        target_start_point_normalized = batch['start_point_normalized'].squeeze(1)
-        target_displacement_normalized = batch['displacement_normalized'].squeeze(1)
+        pred_end_point_normalized = results['normalized_end_point']
+        target_end_point_normalized = batch['end_point_normalized'].squeeze(1)
 
         # KL divergence loss
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
         # Reconstruction loss
-        start_point_loss = self.l2_loss(target_start_point_normalized, pred_start_point_normalized)
-        displacement_loss = self.l2_loss(target_displacement_normalized, pred_displacement_normalized)
+        end_point_loss = self.l2_loss(target_end_point_normalized, pred_end_point_normalized)
 
-        total_loss = start_point_loss + displacement_loss + effective_kl_loss
+        total_loss = end_point_loss + effective_kl_loss
 
-        # Error metrics stay in real-world units for interpretable logging/early stopping
-        pred_start_point = results['start_point']
-        pred_displacement = results['displacement']
-        target_start_point = batch['start_point'].squeeze(1)
-        target_displacement = batch['displacement'].squeeze(1)
+        # Error metric stays in real-world units for interpretable logging/early stopping.
+        # Per-sample Euclidean distance, averaged over the batch (not a single Frobenius
+        # norm over the whole batch tensor).
+        pred_end_point = results['end_point']
+        target_end_point = batch['end_point'].squeeze(1)
 
-        start_point_error = torch.norm(pred_start_point - target_start_point).mean().item()
-        displacement_error = torch.norm(pred_displacement - target_displacement).mean().item()
+        end_point_error = torch.norm(pred_end_point - target_end_point, dim=1).mean().item()
 
         return {
             'total_loss': total_loss.item(),
-            'start_point_loss': start_point_loss.item(),
-            'displacement_loss': displacement_loss.item(),
+            'end_point_loss': end_point_loss.item(),
             'kl_loss': kl_loss.item(),
             'kl_loss_effective': effective_kl_loss.item(),
-            'start_point_error': start_point_error,
-            'displacement_error': displacement_error
+            'end_point_error': end_point_error,
         }
 
     def validate(self, val_loader: DataLoader) -> Dict[str, float]:
@@ -436,10 +432,9 @@ class PushVibesTrainer:
         error_history = self.sim_val_error_history if source == "sim" else self.real_val_error_history
         loss_history = self.sim_val_loss_history if source == "sim" else self.real_val_loss_history
 
-        total_error = losses["start_point_error"] + losses["displacement_error"]
+        total_error = losses["end_point_error"]
         error_history["total"].append(total_error)
-        error_history["start_point"].append(losses["start_point_error"])
-        error_history["displacement"].append(losses["displacement_error"])
+        error_history["end_point"].append(losses["end_point_error"])
 
         _append_loss_history(loss_history, losses)
 
@@ -449,8 +444,7 @@ class PushVibesTrainer:
         logger.info(
             f'{label}: '
             f'{source}_val_loss={losses["total_loss"]:.4f}, '
-            f'{source}_val_start_point_loss={losses["start_point_loss"]:.4f}, '
-            f'{source}_val_displacement_loss={losses["displacement_loss"]:.4f}, '
+            f'{source}_val_end_point_loss={losses["end_point_loss"]:.4f}, '
             f'{source}_val_kl_loss={losses["kl_loss"]:.4f}'
         )
 
@@ -486,17 +480,19 @@ class PushVibesTrainer:
         epochs_without_improvement = 0
         min_delta = 1e-6
         use_sim_for_best = self.sim_validation and self.sim_data_pts_per_epoch == -1 and self.real_data_pts_per_epoch == 0
+        # beta_goal is 0 during these epochs (see the schedule below), so their val loss has
+        # no KL term and isn't comparable to post-warmup losses. Best-weight tracking is
+        # deferred until beta_goal reaches its target value, so an artificially low
+        # pre-KL loss can never lock out every epoch that follows it.
+        kl_warmup_epochs = 3
 
         self.beta_goal = 0.0
         initial_eval = self.evaluate_current_weights("Initial evaluation")
-        initial_best_val_loss, initial_checkpoint_loss = self._checkpoint_metrics(initial_eval, use_sim_for_best)
+        _initial_best_val_loss, initial_checkpoint_loss = self._checkpoint_metrics(initial_eval, use_sim_for_best)
         self.scheduler.step(initial_eval["real"]["total_loss"])
 
-        if initial_best_val_loss < (best_val_loss - min_delta):
-            best_val_loss = initial_best_val_loss
-            self.save_checkpoint(-1, initial_checkpoint_loss, True)
-        else:
-            self.save_checkpoint(-1, initial_checkpoint_loss, False)
+        # Pre-training, beta_goal=0 eval is never eligible to be "best" for the same reason.
+        self.save_checkpoint(-1, initial_checkpoint_loss, False)
 
         save_val_error_plot(
             self.sim_val_error_history,
@@ -514,7 +510,7 @@ class PushVibesTrainer:
         for epoch in range(self.num_epochs):
             self.current_epoch = epoch
 
-            if epoch < 3:
+            if epoch < kl_warmup_epochs:
                 self.beta_goal = 0.0
             else:
                 self.beta_goal = self.beta_goal_after_a_few_epochs # 0.00001 for sim training only, Why is this so low?
@@ -530,12 +526,21 @@ class PushVibesTrainer:
             # Scheduler step with validation loss
             self.scheduler.step(eval_results["real"]["total_loss"])
 
-            # Check for improvement
-            is_best = best_epoch_val_loss < (best_val_loss - min_delta)
+            # Check for improvement. Epochs before the KL term is fully active are never
+            # eligible to be "best" (see kl_warmup_epochs above); the first post-warmup
+            # epoch unconditionally establishes the baseline instead of competing against
+            # a pre-KL loss it structurally can't beat.
+            if epoch < kl_warmup_epochs:
+                is_best = False
+            elif epoch == kl_warmup_epochs:
+                is_best = True
+            else:
+                is_best = best_epoch_val_loss < (best_val_loss - min_delta)
+
             if is_best:
                 best_val_loss = best_epoch_val_loss
                 epochs_without_improvement = 0
-            else:
+            elif epoch >= kl_warmup_epochs:
                 epochs_without_improvement += 1
 
             self.save_checkpoint(epoch, checkpoint_loss, is_best)
@@ -562,8 +567,7 @@ class PushVibesTrainer:
             train_epochs = list(range(1, len(self.train_loss_history["total"]) + 1))
             plt.figure(figsize=(10, 6))
             plt.plot(train_epochs, self.train_loss_history["total"], linestyle="-", label="total")
-            plt.plot(train_epochs, self.train_loss_history["start_point"], linestyle="--", label="start point")
-            plt.plot(train_epochs, self.train_loss_history["displacement"], linestyle=":", label="displacement")
+            plt.plot(train_epochs, self.train_loss_history["end_point"], linestyle="--", label="end point")
             plt.plot(train_epochs, self.train_loss_history["kl"], linestyle="-.", label="kl (effective)")
             plt.xlabel("Epoch")
             plt.ylabel("Training Loss")
@@ -579,37 +583,37 @@ def main() -> None:
     # Set random seed
     set_seed(333)
 
-    run_name_prefix = "cao_sim_ac_only_bg0.01"
+    run_name_prefix = "realsense_bg0.08"
     if run_name_prefix is None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
-    
+
     # Initialize trainer and start training
     trainer = PushVibesTrainer(
         n_neurons=512,
         in_bps=128,
         goalD=7,  # 2, 7
         feature_dim=128,
-        beta_goal=0.01, # 0.00001 was used for sim only training
-        batch_size=128, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
-        learning_rate=1e-4, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
+        beta_goal=0.08, # 0.00001 was used for sim only training
+        batch_size=64, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
+        learning_rate=5e-5, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
         num_epochs=600, # 350 usually sufficient for fine/co-training
-        seed=333,
+        seed=334,
         deterministic=False,
         use_directional_bps=True,
         sim_validation=False,  # Set to False to skip sim validation loss/plot
-        sim_data_dir='./data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data/',
-        real_data_dir='/home/britton/CAO_sim_parsed_data_June2026/Yanxi_auto_collect/object_frame/train',
-        validation_data_dir='/home/britton/CAO_sim_parsed_data_June2026/Yanxi_auto_collect/object_frame/test/',
+        sim_data_dir='/home/britton/PushVIBES/data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data',
+        real_data_dir='/home/britton/PushVIBES/data/all_good_realsense_data/training',
+        validation_data_dir='/home/britton/PushVIBES/data/all_good_realsense_data/test',
         # pretrained_weights_path='./weights/oriented/new_old_data_mix_checkpoint_noisy_115_0.000462.pt',
         # pretrained_weights_path='checkpoints/deterministic/deterministic_all_simlocal_20260407_161509/latest_model_weights.pt',
         pretrained_weights_path=None, # Set to None to train from scratch
-        sim_data_pts_per_epoch=0, # 561
+        sim_data_pts_per_epoch=612, # 561
         real_data_pts_per_epoch=-1, # 561, -1 is all
         real_loss_weight=1.0,
         run_name_prefix=run_name_prefix
     )
     trainer.train()
-    
+
     # Save the model's state_dict (weights) to a pickle file
     pickle_path = trainer.checkpoint_dir / 'pushVIBES_model_weights.pkl'
     pickle.dump(trainer.model.state_dict(), open(pickle_path, 'wb'))

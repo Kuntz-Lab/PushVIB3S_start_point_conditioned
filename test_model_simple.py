@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 
-from PullVIBES_ptv3 import PullVIB3S
-from pull_dataset import PullDataset
+from PushVIB3S_start_point_conditioned import PushVIB3S_start_point_conditioned
+from dataset import PushDataset
 from test_model import load_weights
-from pull_utils import set_seed, visualize_action_prediction
+from utils import set_seed, visualize_action_prediction
 
 
 if __name__ == "__main__":
@@ -18,21 +18,26 @@ if __name__ == "__main__":
 
     deterministic_farthest_point_sampling = True
     n_neurons = 512
+    in_bps = 128
     goalD = 7
     feature_dim = 128
+    use_directional_bps = True
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.serialization.add_safe_globals([PullVIB3S])
+    torch.serialization.add_safe_globals([PushVIB3S_start_point_conditioned])
 
-    dataset = PullDataset(
+    dataset = PushDataset(
         data_dir=dataset_path,
+        use_directional_bps=use_directional_bps,
         deterministic_farthest_point_sampling=deterministic_farthest_point_sampling,
     )
 
-    model = PullVIB3S(
+    model = PushVIB3S_start_point_conditioned(
         n_neurons=n_neurons,
+        in_bps=in_bps,
         goalD=goalD,
         feature_dim=feature_dim,
+        use_directional_bps=use_directional_bps,
         deterministic=True,
     ).to(device)
 
@@ -53,8 +58,8 @@ if __name__ == "__main__":
         for i in range(len(dataset)):
             data = dataset[i]
 
-            start_pc    = data['start_pc'].unsqueeze(0).to(device)           # (1, N, 3)
-            goal_pc     = data['goal_pc'].unsqueeze(0).to(device)            # (1, N, 3)
+            start_bps   = data['start_bps'].unsqueeze(0).to(device)          # (1, in_bps)
+            goal_bps    = data['goal_bps'].unsqueeze(0).to(device)           # (1, in_bps)
             start_point = torch.tensor(data['start_point_normalized'],
                                        dtype=torch.float32).to(device).view(1, 3)  # (1, 3)
             x_mean      = torch.tensor(data['x_mean'],
@@ -66,7 +71,7 @@ if __name__ == "__main__":
 
             if visualize_distribution:
                 sampled = model.sample_from_posterior(
-                    start_pc, goal_pc, start_point=start_point,
+                    start_bps, goal_bps, start_point=start_point,
                     x_mean=x_mean, x_max=x_max,
                     num_samples=n_distribution_samples,
                 )  # (1, n_distribution_samples, 3)
@@ -78,7 +83,7 @@ if __name__ == "__main__":
                     gt_end_point=gt_end_point,
                 )
 
-            outputs = model(start_pc, goal_pc, start_point=start_point,
+            outputs = model(start_bps, goal_bps, start_point,
                             x_mean=x_mean, x_max=x_max)
 
             pred_end_point = outputs['end_point'].squeeze(0).cpu().numpy()   # (3,)

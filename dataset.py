@@ -59,13 +59,14 @@ class PushDataset(Dataset):
                 start_point = np.expand_dims(start_point, axis=0)  # Add batch dimension
             if displacement.shape[0] == 3:
                 displacement = np.expand_dims(displacement, axis=0)  # Add batch dimension
-            
+
             # ensure the type of start_point and displacement is float32 for consistency
             start_point = start_point.astype(np.float32)
             displacement = displacement.astype(np.float32)
+            end_point = start_point + displacement  # push end point, in the input frame
 
             item["start_point"] = start_point
-            item["displacement"] = displacement
+            item["end_point"] = end_point
 
         if start_pc.shape[0] > self.num_points_per_pc:
             start_pc = farthest_point_sampling(start_pc, self.num_points_per_pc, use_internally_random_seed=(not self.deterministic_farthest_point_sampling))
@@ -89,10 +90,10 @@ class PushDataset(Dataset):
         start_pc_normalized = start_pc_normalized.to(device) if isinstance(start_pc_normalized, torch.Tensor) else torch.FloatTensor(start_pc_normalized).to(device)
         goal_pc_normalized = goal_pc_normalized.to(device) if isinstance(goal_pc_normalized, torch.Tensor) else torch.FloatTensor(goal_pc_normalized).to(device)
 
-        # Normalize start point
+        # Normalize start point and end point using the same scalers as the point clouds
         start_point_normalized = ((item["start_point"] - x_mean) / x_max).astype(np.float32)
-        displacement_normalized = (item["displacement"] / x_max).astype(np.float32)
-        
+        end_point_normalized = ((item["end_point"] - x_mean) / x_max).astype(np.float32)
+
         # Use the class attribute for directional BPS
         if self.use_directional_bps:
             # Encode with directions
@@ -114,7 +115,7 @@ class PushDataset(Dataset):
             
         
         item["start_point_normalized"] = start_point_normalized
-        item["displacement_normalized"] = displacement_normalized
+        item["end_point_normalized"] = end_point_normalized
         item["start_bps"] = start_bps
         item["goal_bps"] = goal_bps
         item["start_pc"] = start_pc_normalized
