@@ -4,6 +4,14 @@ import torch.nn.functional as F
 
 from bps import denormalize_torch
 
+# Prediction strategies, selecting both which output head(s) drive training and how the
+# loss is computed for them (see PushVibesTrainer in train.py for the loss side).
+STRATEGY_END_POINT = "end_point"                  # predict the absolute end point directly
+STRATEGY_DISPLACEMENT = "displacement"            # predict start -> end displacement directly
+STRATEGY_DIRECTION_MAGNITUDE = "direction_magnitude"  # predict a unit direction and a scalar magnitude
+VALID_STRATEGIES = (STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, STRATEGY_DIRECTION_MAGNITUDE)
+
+
 class PushVIB3S_start_point_conditioned(nn.Module):
     def __init__(self,
                  n_neurons=512,
@@ -14,10 +22,14 @@ class PushVIB3S_start_point_conditioned(nn.Module):
                  bps_dir="bps/",
                  use_directional_bps=False,
                  deterministic=False,
+                 strategy=STRATEGY_END_POINT,
                  ):
         super(PushVIB3S_start_point_conditioned, self).__init__()
-        
+
         print(f"[PushVIB3S_start_point_conditioned __init__] Received parameters: in_bps={in_bps}, use_directional_bps={use_directional_bps}")
+
+        if strategy not in VALID_STRATEGIES:
+            raise ValueError(f"strategy must be one of {VALID_STRATEGIES}, got {strategy!r}")
 
         self.goalD = goalD
         self.data_dir = data_dir
@@ -27,6 +39,7 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         self.max_dist = 0.0
         self.use_directional_bps = use_directional_bps
         self.deterministic = deterministic
+        self.strategy = strategy
 
         # Store the original in_bps value
         self.original_in_bps = in_bps
@@ -86,7 +99,9 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         )
         
         # Prediction heads
-        self.end_point_head = nn.Linear(128, 3)  # xyz end point (normalized)
+        self.end_point_head = nn.Linear(128, 3)  # xyz end point (normalized), or displacement for STRATEGY_DISPLACEMENT
+        self.direction_head = nn.Linear(128, 3)  # unit push direction (normalized), used by STRATEGY_DIRECTION_MAGNITUDE
+        self.magnitude_head = nn.Linear(128, 1)  # scalar push magnitude (softplus'd to stay non-negative)
         print(f"[PushVIB3S_start_point_conditioned __init__] Model initialization complete.")
 
     def encode_goal(self, goal_bps):
@@ -106,6 +121,30 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         """Encode the start BPS into the start feature representation."""
         return self.start_encoder(start_bps)
 
+    def _predict_from_mlp_output(self, mlp_output, start_point_normalized):
+        """Run all three prediction heads and combine them per self.strategy.
+
+        Always computes the direction/magnitude heads (and the raw end_point_head
+        output) regardless of strategy, so their weights exist and can be inspected
+        even when unused for training -- only the combination logic below depends on
+        self.strategy. Returns (normalized_end_point, normalized_displacement,
+        direction, normalized_magnitude), all in normalized space.
+        """
+        raw_end_point_head_output = self.end_point_head(mlp_output)  # [batch, 3]
+        direction = F.normalize(self.direction_head(mlp_output), dim=1)  # [batch, 3], unit vectors
+        magnitude = F.softplus(self.magnitude_head(mlp_output)).squeeze(-1)  # [batch], >= 0
+
+        if self.strategy == STRATEGY_DISPLACEMENT:
+            normalized_displacement = raw_end_point_head_output
+            normalized_end_point = start_point_normalized + normalized_displacement
+        elif self.strategy == STRATEGY_DIRECTION_MAGNITUDE:
+            normalized_displacement = direction * magnitude.unsqueeze(-1)
+            normalized_end_point = start_point_normalized + normalized_displacement
+        else:  # STRATEGY_END_POINT
+            normalized_end_point = raw_end_point_head_output
+            normalized_displacement = normalized_end_point - start_point_normalized
+
+        return normalized_end_point, normalized_displacement, direction, magnitude
 
     def forward(self, start_bps, goal_bps, start_point, x_mean=None, x_max=None):
         # Remove any extra dimensions
@@ -147,18 +186,21 @@ class PushVIB3S_start_point_conditioned(nn.Module):
 
         # Pass through the MLP to predict the end point
         mlp_output = self.mlp(combined_input)
-        end_point = self.end_point_head(mlp_output)  # [batch, 3], normalized
 
         # make sure x_mean and x_max are Double precision tensors
         if x_mean.dtype != torch.float32:
             x_mean = x_mean.to(torch.float32)
             x_max = x_max.to(torch.float32)
-        
+
         # Remove the 2nd dimension from x_mean and x_max if they have more than two dimensions
         if x_mean.dim() > 2:
             x_mean = x_mean.squeeze(1)
         if x_max.dim() > 2:
             x_max = x_max.squeeze(1)
+
+        end_point, normalized_displacement, direction, normalized_magnitude = self._predict_from_mlp_output(
+            mlp_output, start_point
+        )
 
         end_point_final = denormalize_torch(end_point, x_mean, x_max)
 
@@ -171,6 +213,9 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         return {
                     "end_point": end_point_final,
                     "normalized_end_point": end_point,
+                    "normalized_displacement": normalized_displacement,
+                    "direction": direction,
+                    "normalized_magnitude": normalized_magnitude,
                     "goal_mu": goal_mu,
                     "goal_logvar": goal_logvar,
                     "kl_goal": kl_goal,
@@ -223,9 +268,10 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         goal_features_flat = self.project_goal(z_goals_flat)                      # (B*S, feature_dim)
         start_feature_flat = start_feature.repeat_interleave(num_samples, dim=0)  # (B*S, feature_dim)
         start_point_flat   = start_point_feat.repeat_interleave(num_samples, dim=0)
+        start_point_raw_flat = start_point.repeat_interleave(num_samples, dim=0)  # (B*S, 3), normalized
 
         combined = torch.cat([start_feature_flat, goal_features_flat, start_point_flat], dim=1)
-        end_points_norm = self.end_point_head(self.mlp(combined))   # (B*S, 3)
+        end_points_norm, _, _, _ = self._predict_from_mlp_output(self.mlp(combined), start_point_raw_flat)  # (B*S, 3)
 
         x_mean_flat = x_mean.repeat_interleave(num_samples, dim=0)  # (B*S, 3)
         x_max_flat  = x_max.repeat_interleave(num_samples, dim=0)   # (B*S, 1)
@@ -275,9 +321,10 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         goal_features_flat = self.project_goal(z_goals_flat)                      # (B*S, feature_dim)
         start_feature_flat = start_feature.repeat_interleave(num_samples, dim=0)  # (B*S, feature_dim)
         start_point_flat   = start_point_feat.repeat_interleave(num_samples, dim=0)
+        start_point_raw_flat = start_point.repeat_interleave(num_samples, dim=0)  # (B*S, 3), normalized
 
         combined = torch.cat([start_feature_flat, goal_features_flat, start_point_flat], dim=1)
-        end_points_norm = self.end_point_head(self.mlp(combined))   # (B*S, 3)
+        end_points_norm, _, _, _ = self._predict_from_mlp_output(self.mlp(combined), start_point_raw_flat)  # (B*S, 3)
 
         x_mean_flat = x_mean.repeat_interleave(num_samples, dim=0)  # (B*S, 3)
         x_max_flat  = x_max.repeat_interleave(num_samples, dim=0)   # (B*S, 1)

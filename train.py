@@ -1,6 +1,7 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
+import torch.nn.functional as F
 import random
 import numpy as np
 import os
@@ -12,7 +13,13 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader, Subset
 import itertools
 from tqdm import tqdm
-from PushVIB3S_start_point_conditioned import PushVIB3S_start_point_conditioned
+from PushVIB3S_start_point_conditioned import (
+    PushVIB3S_start_point_conditioned,
+    STRATEGY_END_POINT,
+    STRATEGY_DISPLACEMENT,
+    STRATEGY_DIRECTION_MAGNITUDE,
+    VALID_STRATEGIES,
+)
 from dataset import PushDataset
 import pickle
 import torch.multiprocessing as mp
@@ -60,7 +67,11 @@ class PushVibesTrainer:
         real_data_pts_per_epoch: int = -1, # -1 means use all data, otherwise specify how many points to use per epoch
         real_loss_weight: float = 1.0,     # scale real-data loss relative to sim (>1.0 emphasizes real)
         run_name_prefix: str = "",
+        strategy: str = STRATEGY_END_POINT,
     ):
+        if strategy not in VALID_STRATEGIES:
+            raise ValueError(f"strategy must be one of {VALID_STRATEGIES}, got {strategy!r}")
+        self.strategy = strategy
         self.n_neurons = n_neurons
         self.in_bps = in_bps
         self.goalD = goalD
@@ -107,7 +118,8 @@ class PushVibesTrainer:
             goalD=self.goalD,
             feature_dim=self.feature_dim,
             deterministic=self.deterministic,
-            use_directional_bps=self.use_directional_bps
+            use_directional_bps=self.use_directional_bps,
+            strategy=self.strategy,
         ).to(self.device)
         self.l2_loss = nn.MSELoss()
 
@@ -202,7 +214,7 @@ class PushVibesTrainer:
     def _get_run_name(self) -> str:
         job_id = os.getenv('SLURM_JOB_ID', 'local')
         prefix = self.run_name_prefix
-        return f"{prefix}{job_id}_{datetime.now():%Y%m%d_%H%M%S}"
+        return f"{prefix}{self.strategy}_{job_id}_{datetime.now():%Y%m%d_%H%M%S}"
 
     def _load_pretrained_weights(self) -> None:
         if not self.pretrained_weights_path:
@@ -254,6 +266,7 @@ class PushVibesTrainer:
             "sim_data_pts_per_epoch": self.sim_data_pts_per_epoch,
             "real_data_pts_per_epoch": self.real_data_pts_per_epoch,
             "real_loss_weight": self.real_loss_weight,
+            "strategy": self.strategy,
         }
 
         out_path = self.checkpoint_dir / "a_run_config.json"
@@ -275,6 +288,39 @@ class PushVibesTrainer:
         return None
 
 
+    def _reconstruction_loss(
+        self,
+        results: Dict[str, torch.Tensor],
+        start_point_normalized: torch.Tensor,
+        target_end_point_normalized: torch.Tensor,
+    ) -> torch.Tensor:
+        """Strategy-dependent reconstruction loss, computed in normalized space."""
+        target_displacement = target_end_point_normalized - start_point_normalized
+
+        if self.strategy == STRATEGY_DISPLACEMENT:
+            return self.l2_loss(results['normalized_displacement'], target_displacement)
+
+        if self.strategy == STRATEGY_DIRECTION_MAGNITUDE:
+            target_magnitude = torch.norm(target_displacement, dim=1)
+            zero_magnitude = target_magnitude < 1e-8
+
+            target_direction = target_displacement / target_magnitude.clamp(min=1e-8).unsqueeze(1)
+            # Direction is undefined when there's no ground-truth displacement (e.g.
+            # no-diff-goal samples): substitute the (detached) predicted direction as
+            # the target for those rows, so they contribute exactly zero direction
+            # loss and zero gradient instead of an arbitrary constant penalty from
+            # the degenerate zero-vector target.
+            target_direction = torch.where(
+                zero_magnitude.unsqueeze(1), results['direction'].detach(), target_direction
+            )
+
+            direction_loss = (1 - F.cosine_similarity(results['direction'], target_direction, dim=1)).mean()
+            magnitude_loss = self.l2_loss(results['normalized_magnitude'], target_magnitude)
+            return direction_loss + magnitude_loss
+
+        # STRATEGY_END_POINT
+        return self.l2_loss(results['normalized_end_point'], target_end_point_normalized)
+
     def _compute_losses(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Compute (unweighted) loss tensors for one batch, without stepping the optimizer."""
         start_point_normalized = batch['start_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
@@ -288,11 +334,10 @@ class PushVibesTrainer:
         )
 
         # Loss is computed in normalized space
-        pred_end_point = results['normalized_end_point']
         target_end_point = batch['end_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
 
-        # Reconstruction loss for the predicted end point
-        end_point_loss = self.l2_loss(pred_end_point, target_end_point)
+        # Reconstruction loss, per the selected strategy
+        end_point_loss = self._reconstruction_loss(results, start_point_normalized, target_end_point)
 
         # KL divergence losses
         kl_loss = results['kl_goal']
@@ -394,15 +439,14 @@ class PushVibesTrainer:
         )
 
         # Loss is computed in normalized space, to match train_step
-        pred_end_point_normalized = results['normalized_end_point']
         target_end_point_normalized = batch['end_point_normalized'].squeeze(1)
 
         # KL divergence loss
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
-        # Reconstruction loss
-        end_point_loss = self.l2_loss(target_end_point_normalized, pred_end_point_normalized)
+        # Reconstruction loss, per the selected strategy
+        end_point_loss = self._reconstruction_loss(results, start_point_normalized, target_end_point_normalized)
 
         total_loss = end_point_loss + effective_kl_loss
 
@@ -591,6 +635,9 @@ def main() -> None:
     if run_name_prefix is None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
+    # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
+    strategy = STRATEGY_END_POINT
+
     # Initialize trainer and start training
     trainer = PushVibesTrainer(
         n_neurons=512,
@@ -614,7 +661,8 @@ def main() -> None:
         sim_data_pts_per_epoch=612, # 561
         real_data_pts_per_epoch=-1, # 561, -1 is all
         real_loss_weight=1.5,
-        run_name_prefix=run_name_prefix
+        run_name_prefix=run_name_prefix,
+        strategy=strategy,
     )
     trainer.train()
 
