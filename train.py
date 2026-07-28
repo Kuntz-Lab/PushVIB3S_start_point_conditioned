@@ -587,7 +587,7 @@ def main() -> None:
     # Set random seed
     set_seed(333)
 
-    run_name_prefix = "realsense_bg0.0005_weight1.5"
+    run_name_prefix = "realsense_bg0.0005_weight1.5_w_no_diff_data"
     if run_name_prefix is None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
