@@ -16,7 +16,9 @@ if __name__ == "__main__":
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.08local_20260724_142009/checkpoint_200_0.035985.pt" #
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/checkpoint_-1_0.031510.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/latest_model_weights.pt"
-    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.005local_20260724_153206/checkpoint_280_0.030861.pt"
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.005local_20260724_153206/checkpoint_280_0.030861.pt"
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5local_20260724_165655/checkpoint_592_0.027443.pt"
+    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_datalocal_20260727_165643/checkpoint_368_0.021833.pt"
 
     deterministic_farthest_point_sampling = True
     n_neurons = 512
