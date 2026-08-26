@@ -6,9 +6,9 @@ from bps import denormalize_torch
 
 # Prediction strategies, selecting both which output head(s) drive training and how the
 # loss is computed for them (see PushVibesTrainer in train.py for the loss side).
-STRATEGY_END_POINT = "end_point"                  # predict the absolute end point directly
-STRATEGY_DISPLACEMENT = "displacement"            # predict start -> end displacement directly
-STRATEGY_DIRECTION_MAGNITUDE = "direction_magnitude"  # predict a unit direction and a scalar magnitude
+STRATEGY_END_POINT = "end_point"                  # predict the absolute end point directly, in the same frame as the input point clouds (object frame and normalized)
+STRATEGY_DISPLACEMENT = "displacement"            # predict start -> end displacement 
+STRATEGY_DIRECTION_MAGNITUDE = "direction_magnitude"  # predict a unit direction vector and a scalar magnitude
 VALID_STRATEGIES = (STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, STRATEGY_DIRECTION_MAGNITUDE)
 
 

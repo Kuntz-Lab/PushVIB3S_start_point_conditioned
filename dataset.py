@@ -47,8 +47,8 @@ class PushDataset(Dataset):
 
         item = {}
             
-        start_pc = data['start_pointcloud']
-        goal_pc = data['goal_pointcloud']
+        start_pc = data['start_pointcloud'] # in object frame, not normalized or downsampled
+        goal_pc = data['goal_pointcloud'] # in object frame, not normalized or downsampled
 
         if 'start_position' in data and 'displacement' in data:
             # grab the ground truth result and pass it along in the dataset for use in evaluation and visualization

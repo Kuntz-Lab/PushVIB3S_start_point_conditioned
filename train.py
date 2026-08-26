@@ -636,7 +636,7 @@ def main() -> None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
     # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
-    strategy = STRATEGY_END_POINT
+    strategy = STRATEGY_DIRECTION_MAGNITUDE
 
     # Initialize trainer and start training
     trainer = PushVibesTrainer(
