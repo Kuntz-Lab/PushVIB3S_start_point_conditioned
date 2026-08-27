@@ -675,7 +675,7 @@ def main() -> None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
     # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
-    strategy = STRATEGY_DIRECTION_MAGNITUDE
+    strategy = STRATEGY_END_POINT
 
     # ENCODER_BPS or ENCODER_PTV3 -- everything else in this config is shared by both;
     # this is meant to be the only variable you flip to compare encoders.
