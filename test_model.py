@@ -1,12 +1,26 @@
 import torch
 import numpy as np
-from PushVIB3S_start_point_conditioned import PushVIB3S_start_point_conditioned
+from PushVIB3S_start_point_conditioned import (
+    PushVIB3S_start_point_conditioned,
+    STRATEGY_END_POINT,
+    ENCODER_BPS,
+    ENCODER_PTV3,
+)
 from dataset import PushDataset
 import torch.nn as nn
 import random
 import csv
 
 from utils import set_seed, save_weight_comparison_boxplot
+
+
+def _model_inputs(data, encoder_type):
+    """Pick the (start, goal) tensors PushDataset produced for encoder_type: BPS vectors
+    for "bps", raw normalized point clouds for "ptv3". Mirrors PushVibesTrainer._model_inputs
+    in train.py."""
+    if encoder_type == ENCODER_PTV3:
+        return data['start_pc'], data['goal_pc']
+    return data['start_bps'], data['goal_bps']
 
 
 def load_weights(model, weight_path, device):
@@ -22,10 +36,10 @@ def load_weights(model, weight_path, device):
         model.load_state_dict(checkpoint.state_dict())
 
 
-def sample_and_visualize(model, start_bps, start_point, x_mean, x_max, n_samples=1000):
+def sample_and_visualize(model, start_input, start_point, x_mean, x_max, n_samples=1000):
     """Sample end points from the prior p(z_goal) = N(0, I), vectorized."""
     end_points_world = model.sample_from_prior(
-        start_bps, start_point, x_mean, x_max, num_samples=n_samples
+        start_input, start_point, x_mean, x_max, num_samples=n_samples
     )  # (B, n_samples, 3)
 
     predictions = {
@@ -35,14 +49,14 @@ def sample_and_visualize(model, start_bps, start_point, x_mean, x_max, n_samples
     return predictions
 
 
-def sample_and_visualize_posterior(model, start_bps, goal_bps, start_point, x_mean, x_max, n_samples=1000):
-    """Sample end points from the posterior q(z_goal | goal_bps), vectorized."""
-    goal_mu, goal_logvar, _ = model.encode_goal(goal_bps)
+def sample_and_visualize_posterior(model, start_input, goal_input, start_point, x_mean, x_max, n_samples=1000):
+    """Sample end points from the posterior q(z_goal | goal_input), vectorized."""
+    goal_mu, goal_logvar, _ = model.encode_goal(goal_input)
     print("mean:", goal_mu.mean().item())
     print("std:", goal_logvar.exp().pow(0.5).mean().item())
 
     end_points_world = model.sample_from_posterior(
-        start_bps, goal_bps, start_point, x_mean, x_max, num_samples=n_samples
+        start_input, goal_input, start_point, x_mean, x_max, num_samples=n_samples
     )  # (B, n_samples, 3)
 
     predictions = {
@@ -84,8 +98,9 @@ def evaluate_model(
     for i in range(len(dataset)):
         data = dataset[i]
 
-        start_bps = data['start_bps'].unsqueeze(0).to(device)
-        goal_bps = data['goal_bps'].unsqueeze(0).to(device)
+        start_input, goal_input = _model_inputs(data, model.encoder_type)
+        start_input = start_input.unsqueeze(0).to(device)
+        goal_input = goal_input.unsqueeze(0).to(device)
         start_point_normalized = torch.tensor(
             data['start_point_normalized'], dtype=torch.float32
         ).to(device).view(1, 3)
@@ -99,14 +114,14 @@ def evaluate_model(
             missing_ground_truth = True
 
         model.deterministic = True  # Use mean prediction for evaluation
-        outputs = model(start_bps, goal_bps, start_point_normalized, x_mean=x_mean, x_max=x_max)
+        outputs = model(start_input, goal_input, start_point_normalized, x_mean=x_mean, x_max=x_max)
         single_pred = {'end_point': outputs['end_point'].cpu().numpy()}
         model.deterministic = False  # Switch back to stochastic for sampling and visualization
 
         if evaluate_prior:
             _predictions = sample_and_visualize(
                 model,
-                start_bps,
+                start_input,
                 start_point_normalized,
                 x_mean,
                 x_max,
@@ -121,8 +136,8 @@ def evaluate_model(
         if visualize_posterior:
             predictions = sample_and_visualize_posterior(
                 model,
-                start_bps,
-                goal_bps,
+                start_input,
+                goal_input,
                 start_point_normalized,
                 x_mean,
                 x_max,
@@ -181,59 +196,82 @@ def test_model():
     # Add PushVIB3S_start_point_conditioned to safe globals
     torch.serialization.add_safe_globals([PushVIB3S_start_point_conditioned])
 
-    # Load model
-    model = PushVIB3S_start_point_conditioned(
-        n_neurons=n_neurons,
-        in_bps=in_bps,
-        goalD=goalD,
-        feature_dim=feature_dim,
-        use_directional_bps=use_directional_bps,
-    ).to(device)
-
     vibes_models_to_test = [
-        # Fill in with checkpoints trained on this (start-point-conditioned, single end point) architecture.
-        # {"name": "my run", "weight_path": "checkpoints/<run_name>/best_model_weights.pt"},
+        # Fill in with checkpoints to evaluate. encoder_type/strategy must match what each
+        # checkpoint was actually trained with -- both a model and (for "bps") a dataset are
+        # built fresh per entry, so mismatched checkpoints/entries fail loudly at
+        # load_state_dict(strict=True) instead of silently scoring through the wrong heads.
+        # {"name": "my run", "weight_path": "checkpoints/<run_name>/best_model_weights.pt",
+        #  "encoder_type": ENCODER_BPS, "strategy": STRATEGY_END_POINT},
     ]
 
     if not vibes_models_to_test:
-        print("No models listed in vibes_models_to_test — add entries with a name and weight_path before running.")
+        print("No models listed in vibes_models_to_test — add entries with a name, weight_path, "
+              "encoder_type, and strategy before running.")
         return
 
     results_rows = []
     plot_rows = []
 
-    real_world_test_dataset = PushDataset(
-        data_dir="./data/all_good_realsense_data/test",
-        use_directional_bps=use_directional_bps,
-        deterministic_farthest_point_sampling=True,
-    )
+    # Real-world/sim test datasets, built once per distinct encoder_type actually needed
+    # ("bps" datasets require the BPS basis file; "ptv3" ones don't).
+    datasets_by_encoder: dict = {}
 
-    dataset = PushDataset(
-        data_dir='./data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data/',
-        use_directional_bps=use_directional_bps,
-        deterministic_farthest_point_sampling=True
-    )
+    def _get_datasets(encoder_type):
+        if encoder_type not in datasets_by_encoder:
+            real_world_test_dataset = PushDataset(
+                data_dir="./data/all_good_realsense_data/test",
+                use_directional_bps=use_directional_bps,
+                deterministic_farthest_point_sampling=True,
+                encoder_type=encoder_type,
+            )
 
-    # Use 90% for training, 10% for validation
-    train_size = int(0.9 * len(dataset))
-    val_size = len(dataset) - train_size
+            dataset = PushDataset(
+                data_dir='./data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data/',
+                use_directional_bps=use_directional_bps,
+                deterministic_farthest_point_sampling=True,
+                encoder_type=encoder_type,
+            )
 
-    print("Train size: ", train_size)
-    print("Val size: ", val_size)
+            # Use 90% for training, 10% for validation
+            train_size = int(0.9 * len(dataset))
+            val_size = len(dataset) - train_size
 
-    _train_dataset, sim_test_dataset = torch.utils.data.random_split(
-            dataset, [train_size, val_size]
-        )
+            print(f"[{encoder_type}] Train size: ", train_size)
+            print(f"[{encoder_type}] Val size: ", val_size)
 
-    # randomly subsample sim test dataset to sim_test_num_samples samples for faster evaluation
-    sim_test_num_samples = 100 # 1000
-    sim_test_dataset = torch.utils.data.Subset(
-            sim_test_dataset,
-            random.sample(range(len(sim_test_dataset)), min(sim_test_num_samples, len(sim_test_dataset)))
-        )
+            _train_dataset, sim_test_dataset = torch.utils.data.random_split(
+                    dataset, [train_size, val_size]
+                )
+
+            # randomly subsample sim test dataset to sim_test_num_samples samples for faster evaluation
+            sim_test_num_samples = 100 # 1000
+            sim_test_dataset = torch.utils.data.Subset(
+                    sim_test_dataset,
+                    random.sample(range(len(sim_test_dataset)), min(sim_test_num_samples, len(sim_test_dataset)))
+                )
+
+            datasets_by_encoder[encoder_type] = (real_world_test_dataset, sim_test_dataset)
+
+        return datasets_by_encoder[encoder_type]
 
     for model_to_test in vibes_models_to_test:
-        print(f"Testing model: {model_to_test['name']} with weights from {model_to_test['weight_path']}")
+        encoder_type = model_to_test.get("encoder_type", ENCODER_BPS)
+        strategy = model_to_test.get("strategy", STRATEGY_END_POINT)
+
+        print(f"Testing model: {model_to_test['name']} (encoder_type={encoder_type}, strategy={strategy}) "
+              f"with weights from {model_to_test['weight_path']}")
+
+        model = PushVIB3S_start_point_conditioned(
+            n_neurons=n_neurons,
+            in_bps=in_bps,
+            goalD=goalD,
+            feature_dim=feature_dim,
+            use_directional_bps=use_directional_bps,
+            encoder_type=encoder_type,
+            strategy=strategy,
+        ).to(device)
+
         try:
             load_weights(model, model_to_test["weight_path"], device)
         except Exception as e:
@@ -241,6 +279,8 @@ def test_model():
             return
 
         model.eval()
+
+        real_world_test_dataset, sim_test_dataset = _get_datasets(encoder_type)
 
         with torch.no_grad():
             real_stats, real_plot_data = evaluate_model(
@@ -295,12 +335,12 @@ def test_model():
         print(f"Saved weight comparison box plot to {plot_path}")
 
 
-def test_goal_importance(model, start_bps, start_point, device):
+def test_goal_importance(model, start_input, start_point, device):
     """Compare predicted end points when the goal feature is zeroed out vs. randomized,
-    for a fixed start BPS and start point."""
+    for a fixed start input (BPS vector or point cloud) and start point."""
     feature_dim = model.start_point_proj[0].out_features
 
-    start_feature = model.encode_start(start_bps)
+    start_feature = model.encode_start(start_input)
     start_point_feat = model.start_point_proj(start_point)
 
     zero_goal = torch.zeros((1, feature_dim)).to(device)

@@ -7,31 +7,44 @@ from bps import get_random_basis, encode_pcd_with_bps, normalize
 
 from utils import *
 
+VALID_ENCODER_TYPES = ("bps", "ptv3")
+
+
 class PushDataset(Dataset):
-    def __init__(self, data_dir="processed_data/", bps_dir="bps/", use_directional_bps=True, deterministic_farthest_point_sampling=False):
+    def __init__(self, data_dir="processed_data/", bps_dir="bps/", use_directional_bps=True,
+                 deterministic_farthest_point_sampling=False, encoder_type="bps"):
+        if encoder_type not in VALID_ENCODER_TYPES:
+            raise ValueError(f"encoder_type must be one of {VALID_ENCODER_TYPES}, got {encoder_type!r}")
+
         self.data_dir = data_dir
         self.file_list = []
         self.max_dist = 0.0
         self.use_directional_bps = use_directional_bps
+        self.encoder_type = encoder_type
 
         self.num_points_per_pc = 512  # Number of points to sample per point cloud
         self.deterministic_farthest_point_sampling = deterministic_farthest_point_sampling
-        
+
         print(f"Loading data from {data_dir}")
-        print(f"Using directional BPS: {use_directional_bps}")
+        print(f"Using encoder_type: {encoder_type}")
 
-        # Try to load existing basis, if not create and save a new one
-        basis_path = os.path.join(bps_dir, 'bps_basis_r1.0_n128.npy')
+        # BPS encoding needs a basis; the PTv3 encoder consumes raw point clouds directly
+        # (start_pc/goal_pc, always produced below) so no basis is required for it.
+        if self.encoder_type == "bps":
+            print(f"Using directional BPS: {use_directional_bps}")
 
-        if os.path.exists(basis_path):
-            # Kept on CPU: __getitem__ runs in DataLoader worker processes, and producing
-            # CUDA tensors there requires CUDA IPC to hand them back to the main process,
-            # which is fragile (see "Producer process has been terminated..." warnings).
-            self.my_basis = torch.tensor(np.load(basis_path, allow_pickle=True), dtype=torch.float, device='cpu')
-            print("Loaded existing BPS basis")
-        else:
-            raise FileNotFoundError(f"BPS basis file not found at {basis_path}. Please create the basis file before proceeding. You can use bps.py")
-        
+            # Try to load existing basis, if not create and save a new one
+            basis_path = os.path.join(bps_dir, 'bps_basis_r1.0_n128.npy')
+
+            if os.path.exists(basis_path):
+                # Kept on CPU: __getitem__ runs in DataLoader worker processes, and producing
+                # CUDA tensors there requires CUDA IPC to hand them back to the main process,
+                # which is fragile (see "Producer process has been terminated..." warnings).
+                self.my_basis = torch.tensor(np.load(basis_path, allow_pickle=True), dtype=torch.float, device='cpu')
+                print("Loaded existing BPS basis")
+            else:
+                raise FileNotFoundError(f"BPS basis file not found at {basis_path}. Please create the basis file before proceeding. You can use bps.py")
+
         # Get list of all pickle files in directory
         print(f"Getting list of files in {data_dir}")
         self.file_list = find_pickle_files(data_dir)
@@ -94,30 +107,32 @@ class PushDataset(Dataset):
         start_point_normalized = ((item["start_point"] - x_mean) / x_max).astype(np.float32)
         end_point_normalized = ((item["end_point"] - x_mean) / x_max).astype(np.float32)
 
-        # Use the class attribute for directional BPS
-        if self.use_directional_bps:
-            # Encode with directions
-            start_bps_dist, start_bps_dir = encode_pcd_with_bps(start_pc_normalized, self.my_basis, return_directions=True)
-            goal_bps_dist, goal_bps_dir = encode_pcd_with_bps(goal_pc_normalized, self.my_basis, return_directions=True)
-            
-            # Reshape direction vectors correctly
-            # Direction vectors are [batch, n_points, 3], we need to reshape to [batch, n_points*3]
-            start_bps_dir_flat = start_bps_dir.reshape(start_bps_dir.shape[0], -1)
-            goal_bps_dir_flat = goal_bps_dir.reshape(goal_bps_dir.shape[0], -1)
-            
-            # Concatenate distances and directions along feature dimension
-            start_bps = torch.cat([start_bps_dist, start_bps_dir_flat], dim=1)
-            goal_bps = torch.cat([goal_bps_dist, goal_bps_dir_flat], dim=1)
-        else:
-            # Original distance-only encoding
-            start_bps = encode_pcd_with_bps(start_pc_normalized, self.my_basis)
-            goal_bps = encode_pcd_with_bps(goal_pc_normalized, self.my_basis)
-            
-        
+        # BPS encoding is only needed (and only possible -- self.my_basis only exists) when
+        # encoder_type="bps"; the PTv3 encoder consumes start_pc/goal_pc directly, below.
+        if self.encoder_type == "bps":
+            if self.use_directional_bps:
+                # Encode with directions
+                start_bps_dist, start_bps_dir = encode_pcd_with_bps(start_pc_normalized, self.my_basis, return_directions=True)
+                goal_bps_dist, goal_bps_dir = encode_pcd_with_bps(goal_pc_normalized, self.my_basis, return_directions=True)
+
+                # Reshape direction vectors correctly
+                # Direction vectors are [batch, n_points, 3], we need to reshape to [batch, n_points*3]
+                start_bps_dir_flat = start_bps_dir.reshape(start_bps_dir.shape[0], -1)
+                goal_bps_dir_flat = goal_bps_dir.reshape(goal_bps_dir.shape[0], -1)
+
+                # Concatenate distances and directions along feature dimension
+                start_bps = torch.cat([start_bps_dist, start_bps_dir_flat], dim=1)
+                goal_bps = torch.cat([goal_bps_dist, goal_bps_dir_flat], dim=1)
+            else:
+                # Original distance-only encoding
+                start_bps = encode_pcd_with_bps(start_pc_normalized, self.my_basis)
+                goal_bps = encode_pcd_with_bps(goal_pc_normalized, self.my_basis)
+
+            item["start_bps"] = start_bps
+            item["goal_bps"] = goal_bps
+
         item["start_point_normalized"] = start_point_normalized
         item["end_point_normalized"] = end_point_normalized
-        item["start_bps"] = start_bps
-        item["goal_bps"] = goal_bps
         item["start_pc"] = start_pc_normalized
         item["goal_pc"] = goal_pc_normalized
         item["start_pc_unnormalized"] = start_pc  # Keep the original unnormalized point clouds
