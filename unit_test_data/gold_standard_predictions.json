@@ -1,0 +1,54 @@
+{
+  "weights_path": "checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_dataend_point_bps_local_20260827_131126/checkpoint_429_0.020384.pt",
+  "basis_path": "bps/bps_basis_r1.0_n128.npy",
+  "encoder_type": "bps",
+  "seed_base": 20260827,
+  "device": "cpu",
+  "episodes": [
+    {
+      "fixture_file": "episode_0.npz",
+      "source_path": "/home/britton/PushVIBES/data/all_good_realsense_data/test/context_topdown_DiffDef_Zohre_2026-01-30-13-02-01/object_frame_episode_000.pkl",
+      "seed": 20260827,
+      "predicted_end_point": [
+        0.034234728664159775,
+        -0.02139364555478096,
+        0.005912167951464653
+      ],
+      "predicted_displacement": [
+        -0.006990887224674225,
+        0.01044556125998497,
+        -0.011565731838345528
+      ]
+    },
+    {
+      "fixture_file": "episode_1.npz",
+      "source_path": "/home/britton/PushVIBES/data/all_good_realsense_data/test/no_context_testset_c_2026-01-22-16-51-32/object_frame_episode_001.pkl",
+      "seed": 20260828,
+      "predicted_end_point": [
+        -0.011570828035473824,
+        0.029012158513069153,
+        0.01708897389471531
+      ],
+      "predicted_displacement": [
+        -0.004895215854048729,
+        -0.010351311415433884,
+        0.00033712759613990784
+      ]
+    },
+    {
+      "fixture_file": "episode_2.npz",
+      "source_path": "/home/britton/PushVIBES/data/all_good_realsense_data/test/no_context_testset_a_2026-01-22-16-44-41/object_frame_episode_022.pkl",
+      "seed": 20260829,
+      "predicted_end_point": [
+        0.02656925842165947,
+        0.005613361485302448,
+        0.008569451048970222
+      ],
+      "predicted_displacement": [
+        0.009561153128743172,
+        0.00777086429297924,
+        -0.01093604601919651
+      ]
+    }
+  ]
+}
