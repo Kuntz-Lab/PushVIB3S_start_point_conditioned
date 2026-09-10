@@ -1,15 +1,18 @@
 import torch
 import numpy as np
 
-from PushVIB3S_start_point_conditioned import PushVIB3S_start_point_conditioned
+from PushVIB3S_start_point_conditioned import PushVIB3S_start_point_conditioned, ENCODER_BPS, ENCODER_PTV3
 from dataset import PushDataset
-from test_model import load_weights
+from test_model import load_weights, _model_inputs
 from utils import set_seed, visualize_action_prediction
 
 
 if __name__ == "__main__":
     seed = 333
     set_seed(seed)
+
+    # ENCODER_BPS or ENCODER_PTV3 -- must match how weights_path below was trained.
+    encoder_type = ENCODER_BPS
 
     dataset_path = "/home/britton/PushVIBES/data/all_good_realsense_data/test"
 
@@ -18,7 +21,8 @@ if __name__ == "__main__":
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/latest_model_weights.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.005local_20260724_153206/checkpoint_280_0.030861.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5local_20260724_165655/checkpoint_592_0.027443.pt"
-    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_datalocal_20260727_165643/checkpoint_368_0.021833.pt"
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_datalocal_20260727_165643/checkpoint_368_0.021833.pt"
+    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_dataend_point_bps_local_20260827_131126/checkpoint_429_0.020384.pt"
 
     deterministic_farthest_point_sampling = True
     n_neurons = 512
@@ -34,6 +38,7 @@ if __name__ == "__main__":
         data_dir=dataset_path,
         use_directional_bps=use_directional_bps,
         deterministic_farthest_point_sampling=deterministic_farthest_point_sampling,
+        encoder_type=encoder_type,
     )
 
     model = PushVIB3S_start_point_conditioned(
@@ -43,6 +48,7 @@ if __name__ == "__main__":
         feature_dim=feature_dim,
         use_directional_bps=use_directional_bps,
         deterministic=True,
+        encoder_type=encoder_type,
     ).to(device)
 
     print(f"Testing weights: {weights_path}")
@@ -62,8 +68,9 @@ if __name__ == "__main__":
         for i in range(len(dataset)):
             data = dataset[i]
 
-            start_bps   = data['start_bps'].unsqueeze(0).to(device)          # (1, in_bps)
-            goal_bps    = data['goal_bps'].unsqueeze(0).to(device)           # (1, in_bps)
+            start_input, goal_input = _model_inputs(data, encoder_type)
+            start_input = start_input.unsqueeze(0).to(device)                # (1, in_bps) or (1, N, 3)
+            goal_input  = goal_input.unsqueeze(0).to(device)                 # (1, in_bps) or (1, N, 3)
             start_point = torch.tensor(data['start_point_normalized'],
                                        dtype=torch.float32).to(device).view(1, 3)  # (1, 3)
             x_mean      = torch.tensor(data['x_mean'],
@@ -75,7 +82,7 @@ if __name__ == "__main__":
 
             if visualize_distribution:
                 sampled_prior = model.sample_from_prior(
-                    start_bps, start_point,
+                    start_input, start_point,
                     x_mean=x_mean, x_max=x_max,
                     num_samples=n_distribution_samples,
                 )  # (1, n_distribution_samples, 3)
@@ -88,7 +95,7 @@ if __name__ == "__main__":
                 )
 
                 sampled_posterior = model.sample_from_posterior(
-                    start_bps, goal_bps, start_point=start_point,
+                    start_input, goal_input, start_point=start_point,
                     x_mean=x_mean, x_max=x_max,
                     num_samples=n_distribution_samples,
                 )  # (1, n_distribution_samples, 3)
@@ -100,7 +107,7 @@ if __name__ == "__main__":
                     gt_end_point=gt_end_point,
                 )
 
-            outputs = model(start_bps, goal_bps, start_point,
+            outputs = model(start_input, goal_input, start_point,
                             x_mean=x_mean, x_max=x_max)
 
             pred_end_point = outputs['end_point'].squeeze(0).cpu().numpy()   # (3,)

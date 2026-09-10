@@ -7,29 +7,45 @@ from bps import denormalize_torch
 # Prediction strategies, selecting both which output head(s) drive training and how the
 # loss is computed for them (see PushVibesTrainer in train.py for the loss side).
 STRATEGY_END_POINT = "end_point"                  # predict the absolute end point directly, in the same frame as the input point clouds (object frame and normalized)
-STRATEGY_DISPLACEMENT = "displacement"            # predict start -> end displacement 
+STRATEGY_DISPLACEMENT = "displacement"            # predict start -> end displacement
 STRATEGY_DIRECTION_MAGNITUDE = "direction_magnitude"  # predict a unit direction vector and a scalar magnitude
 VALID_STRATEGIES = (STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, STRATEGY_DIRECTION_MAGNITUDE)
+
+# Point-cloud encoder options. "bps" is the original Basis Point Set encoding (a fixed
+# linear+ResBlock stack over precomputed BPS vectors). "ptv3" swaps in a PointTransformerV3
+# backbone (via PTV3ObservationEncoder) operating directly on raw normalized point clouds.
+# Everything downstream of the encoders (latent sampling, KL, goal decoder, MLP, output
+# heads, strategies) is shared, unchanged code for both.
+ENCODER_BPS = "bps"
+ENCODER_PTV3 = "ptv3"
+VALID_ENCODER_TYPES = (ENCODER_BPS, ENCODER_PTV3)
 
 
 class PushVIB3S_start_point_conditioned(nn.Module):
     def __init__(self,
                  n_neurons=512,
-                 in_bps=512,         # dimension of basis point set encoding
+                 in_bps=512,         # dimension of basis point set encoding (encoder_type="bps" only)
                  goalD=7,            #  6 + 1 for the goal
                  feature_dim=128,  # dimension for goal feature space
                  data_dir="processed_data/",
                  bps_dir="bps/",
-                 use_directional_bps=False,
+                 use_directional_bps=False,   # encoder_type="bps" only
                  deterministic=False,
                  strategy=STRATEGY_END_POINT,
+                 encoder_type=ENCODER_BPS,
+                 grid_size=0.01,        # PTv3 voxelization grid size (encoder_type="ptv3" only)
+                 order="z",             # PTv3 serialization curve order (encoder_type="ptv3" only)
+                 shuffle_orders=False,  # whether PTv3 shuffles between serialization orders (encoder_type="ptv3" only)
+                 enable_flash=False,    # whether PTv3 attention uses FlashAttention (encoder_type="ptv3" only)
                  ):
         super(PushVIB3S_start_point_conditioned, self).__init__()
 
-        print(f"[PushVIB3S_start_point_conditioned __init__] Received parameters: in_bps={in_bps}, use_directional_bps={use_directional_bps}")
-
         if strategy not in VALID_STRATEGIES:
             raise ValueError(f"strategy must be one of {VALID_STRATEGIES}, got {strategy!r}")
+        if encoder_type not in VALID_ENCODER_TYPES:
+            raise ValueError(f"encoder_type must be one of {VALID_ENCODER_TYPES}, got {encoder_type!r}")
+
+        print(f"[PushVIB3S_start_point_conditioned __init__] Received parameters: encoder_type={encoder_type}, in_bps={in_bps}, use_directional_bps={use_directional_bps}")
 
         self.goalD = goalD
         self.data_dir = data_dir
@@ -40,49 +56,82 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         self.use_directional_bps = use_directional_bps
         self.deterministic = deterministic
         self.strategy = strategy
+        self.encoder_type = encoder_type
 
         # Store the original in_bps value
         self.original_in_bps = in_bps
-        
-        # Adjust input dimension if using directional BPS
-        if use_directional_bps:
-            # For directional BPS: original dimension + 3D direction vectors
-            self.in_bps = in_bps * 4  # 1 distance + 3 direction components per basis point
-            print(f"[PushVIB3S_start_point_conditioned __init__] 'use_directional_bps' is True. Calculated self.in_bps = {self.in_bps}")
-        else:
-            self.in_bps = in_bps
-            print(f"[PushVIB3S_start_point_conditioned __init__] 'use_directional_bps' is False. Calculated self.in_bps = {self.in_bps}")
 
-        # ---------------------------
-        # Goal Encoder: encodes the goal BPS into a latent space
-        # ---------------------------
-        print(f"[PushVIB3S_start_point_conditioned __init__] Initializing goal_encoder with self.in_bps = {self.in_bps}")
-        self.goal_encoder = nn.Sequential(
-            nn.Linear(self.in_bps, n_neurons),  # Changed from self.original_in_bps to n_neurons
-            nn.BatchNorm1d(n_neurons),
-            ResBlock(n_neurons, n_neurons),
-            ResBlock(n_neurons, n_neurons)
-        )
-        # Projection head to create a target feature representation for reconstruction.
-        self.goal_proj = nn.Linear(n_neurons, feature_dim)
+        if self.encoder_type == ENCODER_BPS:
+            # Adjust input dimension if using directional BPS
+            if use_directional_bps:
+                # For directional BPS: original dimension + 3D direction vectors
+                self.in_bps = in_bps * 4  # 1 distance + 3 direction components per basis point
+                print(f"[PushVIB3S_start_point_conditioned __init__] 'use_directional_bps' is True. Calculated self.in_bps = {self.in_bps}")
+            else:
+                self.in_bps = in_bps
+                print(f"[PushVIB3S_start_point_conditioned __init__] 'use_directional_bps' is False. Calculated self.in_bps = {self.in_bps}")
+
+            # ---------------------------
+            # Goal Encoder: encodes the goal BPS into a latent space
+            # ---------------------------
+            print(f"[PushVIB3S_start_point_conditioned __init__] Initializing goal_encoder with self.in_bps = {self.in_bps}")
+            self.goal_encoder = nn.Sequential(
+                nn.Linear(self.in_bps, n_neurons),  # Changed from self.original_in_bps to n_neurons
+                nn.BatchNorm1d(n_neurons),
+                ResBlock(n_neurons, n_neurons),
+                ResBlock(n_neurons, n_neurons)
+            )
+            # Projection head to create a target feature representation for reconstruction.
+            self.goal_proj = nn.Linear(n_neurons, feature_dim)
+
+            print(f"[PushVIB3S_start_point_conditioned __init__] Initializing start_encoder with self.in_bps = {self.in_bps}")
+            self.start_encoder = nn.Sequential(
+                nn.Linear(self.in_bps, n_neurons),  # Changed from self.original_in_bps to n_neurons
+                nn.BatchNorm1d(n_neurons),
+                ResBlock(n_neurons, n_neurons),
+                ResBlock(n_neurons, feature_dim)
+            )
+        else:  # ENCODER_PTV3
+            # Imported lazily, only when actually needed: PTv3's deps (spconv, torch_scatter,
+            # timm, addict) are heavy and only required for this encoder -- encoder_type="bps"
+            # must keep working in an environment that doesn't have them installed.
+            from ptv3_encoder import PTV3ObservationEncoder
+
+            print(f"[PushVIB3S_start_point_conditioned __init__] Initializing PTv3 goal_encoder/start_encoder "
+                  f"with grid_size={grid_size}, order={order}, shuffle_orders={shuffle_orders}, enable_flash={enable_flash}")
+
+            # Goal encoder pools to an n_neurons-dim feature (same shape goal_encoder produces
+            # in "bps" mode), so goal_mu/goal_logvar below are identical for either encoder.
+            self.goal_encoder = PTV3ObservationEncoder(
+                latent_dim=n_neurons,
+                grid_size=grid_size,
+                order=order,
+                shuffle_orders=shuffle_orders,
+                enable_flash=enable_flash,
+            )
+            # No goal_proj / reconstruction-target projection for PTv3 -- mirrors PullVIB3S,
+            # which has no such head (see encode_goal below).
+
+            # Start encoder pools directly to feature_dim (PTV3ObservationEncoder's latent_dim
+            # already does the final projection, unlike the "bps" start_encoder above).
+            self.start_encoder = PTV3ObservationEncoder(
+                latent_dim=feature_dim,
+                grid_size=grid_size,
+                order=order,
+                shuffle_orders=shuffle_orders,
+                enable_flash=enable_flash,
+            )
+
         self.goal_mu = nn.Linear(n_neurons, self.goalD)
         self.goal_logvar = nn.Linear(n_neurons, self.goalD)
 
-        # Goal Decoder: decodes z_goal into a reconstructed goal feature.
+        # Goal Decoder: decodes z_goal into a reconstructed goal feature. Shared by both encoders.
         self.goal_decoder = nn.Sequential(
             nn.Linear(self.goalD, 64),
             nn.ReLU(),
             nn.BatchNorm1d(64),
             ResBlock(64, 128),
             ResBlock(128, feature_dim)
-        )
-
-        print(f"[PushVIB3S_start_point_conditioned __init__] Initializing start_encoder with self.in_bps = {self.in_bps}")
-        self.start_encoder = nn.Sequential(
-            nn.Linear(self.in_bps, n_neurons),  # Changed from self.original_in_bps to n_neurons
-            nn.BatchNorm1d(n_neurons),
-            ResBlock(n_neurons, n_neurons),
-            ResBlock(n_neurons, feature_dim)
         )
 
         self.start_point_proj = nn.Sequential(nn.Linear(3, feature_dim), nn.ReLU())
@@ -104,11 +153,24 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         self.magnitude_head = nn.Linear(128, 1)  # scalar push magnitude (softplus'd to stay non-negative)
         print(f"[PushVIB3S_start_point_conditioned __init__] Model initialization complete.")
 
-    def encode_goal(self, goal_bps):
-        """Encode goal into latent space and project to a target feature representation."""
-        hidden_goal = self.goal_encoder(goal_bps)  # [batch, n_neurons]
-        # This projection serves as the reconstruction target for the goal.
-        goal_feature_target = self.goal_proj(hidden_goal)
+    @staticmethod
+    def _to_ptv3_input(point_cloud):
+        """Reshape a (B, N, 3) point cloud into the (B, 1, N, 3) layout PTV3ObservationEncoder expects."""
+        return point_cloud.unsqueeze(1)
+
+    def encode_goal(self, goal_input):
+        """Encode the goal (BPS vector or point cloud, depending on encoder_type) into latent
+        distribution parameters, plus a reconstruction-target feature (encoder_type="bps" only;
+        None for "ptv3", which has no such head -- always returns a 3-tuple either way so
+        existing "bps"-mode callers unpacking (mu, logvar, goal_feature_target) keep working)."""
+        if self.encoder_type == ENCODER_BPS:
+            hidden_goal = self.goal_encoder(goal_input)  # [batch, n_neurons]
+            # This projection serves as the reconstruction target for the goal.
+            goal_feature_target = self.goal_proj(hidden_goal)
+        else:  # ENCODER_PTV3
+            hidden_goal = self.goal_encoder(self._to_ptv3_input(goal_input))  # [batch, n_neurons]
+            goal_feature_target = None
+
         mu = self.goal_mu(hidden_goal)
         logvar = torch.clamp(self.goal_logvar(hidden_goal), min=-20, max=2)
         return mu, logvar, goal_feature_target
@@ -117,9 +179,12 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         """Project z_goal into a goal feature representation."""
         return self.goal_decoder(z_goal)
 
-    def encode_start(self, start_bps):
-        """Encode the start BPS into the start feature representation."""
-        return self.start_encoder(start_bps)
+    def encode_start(self, start_input):
+        """Encode the start input (BPS vector or point cloud, depending on encoder_type) into
+        the start feature representation."""
+        if self.encoder_type == ENCODER_BPS:
+            return self.start_encoder(start_input)
+        return self.start_encoder(self._to_ptv3_input(start_input))  # ENCODER_PTV3
 
     def _predict_from_mlp_output(self, mlp_output, start_point_normalized):
         """Run all three prediction heads and combine them per self.strategy.
@@ -146,28 +211,39 @@ class PushVIB3S_start_point_conditioned(nn.Module):
 
         return normalized_end_point, normalized_displacement, direction, magnitude
 
-    def forward(self, start_bps, goal_bps, start_point, x_mean=None, x_max=None):
-        # Remove any extra dimensions
-        if start_bps.dim() > 2:
-            start_bps = start_bps.squeeze(1)
-        if goal_bps.dim() > 2:
-            goal_bps = goal_bps.squeeze(1)
-                    
-        # Check if we need to reshape the input when using directional BPS
-        if self.use_directional_bps and start_bps.shape[1] != self.in_bps:
-            # Reshape to match expected input size
-            batch_size = start_bps.shape[0]
-            start_bps = start_bps.reshape(batch_size, -1)
-            goal_bps = goal_bps.reshape(batch_size, -1)
-            
-            # # If still not matching, pad with zeros
-            # if start_bps.shape[1] < self.in_bps:
-            #     pad_size = self.in_bps - start_bps.shape[1]
-            #     start_bps = torch.cat([start_bps, torch.zeros(batch_size, pad_size, device=start_bps.device)], dim=1)
-            #     goal_bps = torch.cat([goal_bps, torch.zeros(batch_size, pad_size, device=goal_bps.device)], dim=1)
-        
+    def forward(self, start_input, goal_input, start_point, x_mean=None, x_max=None):
+        """
+        Args:
+            start_input: [B, in_bps] start BPS encoding (encoder_type="bps") or
+                [B, N, 3] normalized start point cloud (encoder_type="ptv3")
+            goal_input: same shape convention as start_input, for the goal
+            start_point (torch.Tensor): [B, 3] normalized start point (the push origin)
+        """
+        if self.encoder_type == ENCODER_BPS:
+            # Remove any extra dimensions
+            if start_input.dim() > 2:
+                start_input = start_input.squeeze(1)
+            if goal_input.dim() > 2:
+                goal_input = goal_input.squeeze(1)
+
+            # Check if we need to reshape the input when using directional BPS
+            if self.use_directional_bps and start_input.shape[1] != self.in_bps:
+                # Reshape to match expected input size
+                batch_size = start_input.shape[0]
+                start_input = start_input.reshape(batch_size, -1)
+                goal_input = goal_input.reshape(batch_size, -1)
+
+                # # If still not matching, pad with zeros
+                # if start_input.shape[1] < self.in_bps:
+                #     pad_size = self.in_bps - start_input.shape[1]
+                #     start_input = torch.cat([start_input, torch.zeros(batch_size, pad_size, device=start_input.device)], dim=1)
+                #     goal_input = torch.cat([goal_input, torch.zeros(batch_size, pad_size, device=goal_input.device)], dim=1)
+        # encoder_type="ptv3": start_input/goal_input arrive as (B, N, 3) already -- no
+        # reshaping needed here, PTV3ObservationEncoder's (B,1,N,3) layout is handled inside
+        # encode_start/encode_goal via _to_ptv3_input.
+
         # Encode goal (get latent parameters and target features for reconstruction)
-        goal_mu, goal_logvar, goal_feature_target = self.encode_goal(goal_bps)
+        goal_mu, goal_logvar, goal_feature_target = self.encode_goal(goal_input)
         if self.deterministic:
             z_goal = goal_mu
         else:
@@ -178,7 +254,7 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         # Decode goal features for reconstruction
         goal_feature = self.project_goal(z_goal)
 
-        start_feature = self.encode_start(start_bps)
+        start_feature = self.encode_start(start_input)
         start_point_feat = self.start_point_proj(start_point)  # [batch, feature_dim]
 
         # Concatenate the reconstructed goal with the start BPS
@@ -222,15 +298,16 @@ class PushVIB3S_start_point_conditioned(nn.Module):
                     "latent_goal": z_goal,
                 }
 
-    def sample_from_posterior(self, start_bps, goal_bps, start_point, x_mean, x_max, num_samples=100):
-        """Sample end points from the posterior distribution q(z_goal | goal_bps), vectorized.
+    def sample_from_posterior(self, start_input, goal_input, start_point, x_mean, x_max, num_samples=100):
+        """Sample end points from the posterior distribution q(z_goal | goal_input), vectorized.
 
         Encodes the goal once, draws num_samples latent codes via the reparameterization trick,
         then processes all samples in a single batched forward pass through the decoder and MLP.
 
         Args:
-            start_bps (torch.Tensor): [B, in_bps] start BPS encoding
-            goal_bps (torch.Tensor): [B, in_bps] goal BPS encoding
+            start_input (torch.Tensor): [B, in_bps] start BPS encoding (encoder_type="bps") or
+                [B, N, 3] normalized start point cloud (encoder_type="ptv3")
+            goal_input (torch.Tensor): same shape convention as start_input, for the goal
             start_point (torch.Tensor): [B, 3] normalized start point
             x_mean (torch.Tensor): [B, 3] normalization mean
             x_max (torch.Tensor): [B, 1] normalization max norm
@@ -239,10 +316,11 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         Returns:
             torch.Tensor: [B, num_samples, 3] denormalized end points
         """
-        if start_bps.dim() > 2:
-            start_bps = start_bps.squeeze(1)
-        if goal_bps.dim() > 2:
-            goal_bps = goal_bps.squeeze(1)
+        if self.encoder_type == ENCODER_BPS:
+            if start_input.dim() > 2:
+                start_input = start_input.squeeze(1)
+            if goal_input.dim() > 2:
+                goal_input = goal_input.squeeze(1)
 
         if x_mean.dtype != torch.float32:
             x_mean = x_mean.to(torch.float32)
@@ -252,10 +330,10 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         if x_max.dim() > 2:
             x_max = x_max.squeeze(1)
 
-        B = start_bps.shape[0]
+        B = start_input.shape[0]
 
-        goal_mu, goal_logvar, _ = self.encode_goal(goal_bps)        # (B, goalD)
-        start_feature = self.encode_start(start_bps)                # (B, feature_dim)
+        goal_mu, goal_logvar, _ = self.encode_goal(goal_input)      # (B, goalD)
+        start_feature = self.encode_start(start_input)              # (B, feature_dim)
         start_point_feat = self.start_point_proj(start_point)       # (B, feature_dim)
 
         # Sample num_samples z_goal vectors per batch item: (B, num_samples, goalD)
@@ -279,7 +357,7 @@ class PushVIB3S_start_point_conditioned(nn.Module):
 
         return end_points_world.view(B, num_samples, 3)
 
-    def sample_from_prior(self, start_bps, start_point, x_mean, x_max, num_samples=100):
+    def sample_from_prior(self, start_input, start_point, x_mean, x_max, num_samples=100):
         """Sample end points from the prior distribution p(z_goal) = N(0, I), vectorized.
 
         Draws num_samples latent codes directly from the standard normal prior (no goal
@@ -287,7 +365,8 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         the decoder and MLP. Mirrors sample_from_posterior but skips encode_goal entirely.
 
         Args:
-            start_bps (torch.Tensor): [B, in_bps] start BPS encoding
+            start_input (torch.Tensor): [B, in_bps] start BPS encoding (encoder_type="bps") or
+                [B, N, 3] normalized start point cloud (encoder_type="ptv3")
             start_point (torch.Tensor): [B, 3] normalized start point
             x_mean (torch.Tensor): [B, 3] normalization mean
             x_max (torch.Tensor): [B, 1] normalization max norm
@@ -296,8 +375,8 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         Returns:
             torch.Tensor: [B, num_samples, 3] denormalized end points
         """
-        if start_bps.dim() > 2:
-            start_bps = start_bps.squeeze(1)
+        if self.encoder_type == ENCODER_BPS and start_input.dim() > 2:
+            start_input = start_input.squeeze(1)
 
         if x_mean.dtype != torch.float32:
             x_mean = x_mean.to(torch.float32)
@@ -307,9 +386,9 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         if x_max.dim() > 2:
             x_max = x_max.squeeze(1)
 
-        B = start_bps.shape[0]
+        B = start_input.shape[0]
 
-        start_feature = self.encode_start(start_bps)                # (B, feature_dim)
+        start_feature = self.encode_start(start_input)              # (B, feature_dim)
         start_point_feat = self.start_point_proj(start_point)       # (B, feature_dim)
 
         # Sample num_samples z_goal vectors per batch item directly from the standard

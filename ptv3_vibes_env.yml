@@ -1,0 +1,39 @@
+# Use this env when running with encoder_type="ptv3" (PointTransformerV3 encoder,
+# ptv3_encoder.py / ptv3/). It's a superset of what encoder_type="bps" needs too
+# (plain torch + open3d/sklearn/etc.), so it's safe to use for either encoder —
+# but it's heavier than necessary for BPS-only work, where a lighter, separate env
+# is fine. Ported from PushVIBES_evolution/environment.yml.
+name: ptv3_vibes_env
+channels:
+  - defaults
+
+dependencies:
+  - python=3.10
+
+  - pip:
+    # PyTorch CUDA 12.1 build — must install torch + torchvision together from the
+    # pytorch whl index so they stay pinned; installing timm/open3d afterward with a
+    # plain 'pip install' can silently upgrade torch to a generic non-cu121 build.
+    # Always verify with: python -c "import torch; print(torch.__version__, torch.version.cuda)"
+    - --extra-index-url https://download.pytorch.org/whl/cu121
+    - torch==2.5.1+cu121
+    - torchvision==0.20.1+cu121
+
+    # torch_scatter must be fetched from the PyG wheel server that matches torch+CUDA
+    - --extra-index-url https://data.pyg.org/whl/torch-2.5.1+cu121.html
+    - torch_scatter==2.1.2+pt25cu121
+
+    # spconv CUDA 12.0 build (compatible with CUDA 12.1 runtime)
+    - spconv-cu120==2.3.6
+
+    # PTv3 / encoding deps
+    - timm==1.0.27
+    - addict==2.4.0
+    - open3d==0.19.0
+
+    # General ML / data
+    - numpy==2.2.6
+    - scipy==1.15.3
+    - scikit-learn==1.7.2
+    - tqdm==4.68.3
+    - matplotlib

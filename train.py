@@ -19,6 +19,9 @@ from PushVIB3S_start_point_conditioned import (
     STRATEGY_DISPLACEMENT,
     STRATEGY_DIRECTION_MAGNITUDE,
     VALID_STRATEGIES,
+    ENCODER_BPS,
+    ENCODER_PTV3,
+    VALID_ENCODER_TYPES,
 )
 from dataset import PushDataset
 import pickle
@@ -68,10 +71,22 @@ class PushVibesTrainer:
         real_loss_weight: float = 1.0,     # scale real-data loss relative to sim (>1.0 emphasizes real)
         run_name_prefix: str = "",
         strategy: str = STRATEGY_END_POINT,
+        encoder_type: str = ENCODER_BPS,
+        grid_size: float = 0.01,        # PTv3 voxelization grid size (encoder_type="ptv3" only)
+        order: str = "z",               # PTv3 serialization curve order (encoder_type="ptv3" only)
+        shuffle_orders: bool = False,   # whether PTv3 shuffles between serialization orders (encoder_type="ptv3" only)
+        enable_flash: bool = False,     # whether PTv3 attention uses FlashAttention (encoder_type="ptv3" only)
     ):
         if strategy not in VALID_STRATEGIES:
             raise ValueError(f"strategy must be one of {VALID_STRATEGIES}, got {strategy!r}")
+        if encoder_type not in VALID_ENCODER_TYPES:
+            raise ValueError(f"encoder_type must be one of {VALID_ENCODER_TYPES}, got {encoder_type!r}")
         self.strategy = strategy
+        self.encoder_type = encoder_type
+        self.grid_size = grid_size
+        self.order = order
+        self.shuffle_orders = shuffle_orders
+        self.enable_flash = enable_flash
         self.n_neurons = n_neurons
         self.in_bps = in_bps
         self.goalD = goalD
@@ -120,6 +135,11 @@ class PushVibesTrainer:
             deterministic=self.deterministic,
             use_directional_bps=self.use_directional_bps,
             strategy=self.strategy,
+            encoder_type=self.encoder_type,
+            grid_size=self.grid_size,
+            order=self.order,
+            shuffle_orders=self.shuffle_orders,
+            enable_flash=self.enable_flash,
         ).to(self.device)
         self.l2_loss = nn.MSELoss()
 
@@ -141,7 +161,8 @@ class PushVibesTrainer:
         # Split sim dataset into train and validation
         full_dataset = PushDataset(
             data_dir=self.sim_data_dir,
-            use_directional_bps=self.use_directional_bps
+            use_directional_bps=self.use_directional_bps,
+            encoder_type=self.encoder_type,
         )
 
         # Use 90% for training, 10% for validation
@@ -169,13 +190,15 @@ class PushVibesTrainer:
         # if self.pretrained_weights_path is not None or self.sim_data_pts_per_epoch == 0:
         self.real_train_dataset = PushDataset(
             data_dir=self.real_data_dir,
-            use_directional_bps=self.use_directional_bps
+            use_directional_bps=self.use_directional_bps,
+            encoder_type=self.encoder_type,
         )
 
         self.real_val_dataset = PushDataset(
             data_dir=self.validation_data_dir,
             use_directional_bps=self.use_directional_bps,
-            deterministic_farthest_point_sampling=True  # Ensure deterministic sampling for validation
+            deterministic_farthest_point_sampling=True,  # Ensure deterministic sampling for validation
+            encoder_type=self.encoder_type,
         )
 
         self.real_val_loader = DataLoader(
@@ -214,7 +237,9 @@ class PushVibesTrainer:
     def _get_run_name(self) -> str:
         job_id = os.getenv('SLURM_JOB_ID', 'local')
         prefix = self.run_name_prefix
-        return f"{prefix}{self.strategy}_{job_id}_{datetime.now():%Y%m%d_%H%M%S}"
+        # encoder_type is mandatory in the run name (and therefore in every checkpoint path
+        # under it), so bps/ptv3 runs and checkpoints are never ambiguous.
+        return f"{prefix}{self.strategy}_{self.encoder_type}_{job_id}_{datetime.now():%Y%m%d_%H%M%S}"
 
     def _load_pretrained_weights(self) -> None:
         if not self.pretrained_weights_path:
@@ -267,6 +292,11 @@ class PushVibesTrainer:
             "real_data_pts_per_epoch": self.real_data_pts_per_epoch,
             "real_loss_weight": self.real_loss_weight,
             "strategy": self.strategy,
+            "encoder_type": self.encoder_type,
+            "grid_size": self.grid_size,
+            "order": self.order,
+            "shuffle_orders": self.shuffle_orders,
+            "enable_flash": self.enable_flash,
         }
 
         out_path = self.checkpoint_dir / "a_run_config.json"
@@ -321,13 +351,21 @@ class PushVibesTrainer:
         # STRATEGY_END_POINT
         return self.l2_loss(results['normalized_end_point'], target_end_point_normalized)
 
+    def _model_inputs(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pick the (start, goal) tensors PushDataset produced for self.encoder_type: BPS
+        vectors for "bps", raw normalized point clouds for "ptv3"."""
+        if self.encoder_type == ENCODER_PTV3:
+            return batch['start_pc'], batch['goal_pc']
+        return batch['start_bps'], batch['goal_bps']
+
     def _compute_losses(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Compute (unweighted) loss tensors for one batch, without stepping the optimizer."""
         start_point_normalized = batch['start_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
+        start_input, goal_input = self._model_inputs(batch)
 
         results = self.model(
-            batch['start_bps'],
-            batch['goal_bps'],
+            start_input,
+            goal_input,
             start_point_normalized,
             x_mean=batch['x_mean'],  # Pass the mean for denormalization
             x_max=batch['x_max']       # Pass the max for denormalization
@@ -429,10 +467,11 @@ class PushVibesTrainer:
 
     def validation_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
         start_point_normalized = batch['start_point_normalized'].squeeze(1)
+        start_input, goal_input = self._model_inputs(batch)
 
         results = self.model(
-            batch['start_bps'],
-            batch['goal_bps'],
+            start_input,
+            goal_input,
             start_point_normalized,
             x_mean=batch['x_mean'],  # Pass the mean for denormalization
             x_max=batch['x_max']       # Pass the max for denormalization
@@ -636,7 +675,11 @@ def main() -> None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
     # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
-    strategy = STRATEGY_DIRECTION_MAGNITUDE
+    strategy = STRATEGY_END_POINT
+
+    # ENCODER_BPS or ENCODER_PTV3 -- everything else in this config is shared by both;
+    # this is meant to be the only variable you flip to compare encoders.
+    encoder_type = ENCODER_BPS
 
     # Initialize trainer and start training
     trainer = PushVibesTrainer(
@@ -663,6 +706,9 @@ def main() -> None:
         real_loss_weight=1.5,
         run_name_prefix=run_name_prefix,
         strategy=strategy,
+        encoder_type=encoder_type,
+        # grid_size/order/shuffle_orders/enable_flash: PTv3-only, left at their defaults
+        # (encoder_type="ptv3"); irrelevant when encoder_type="bps".
     )
     trainer.train()
 
