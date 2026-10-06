@@ -55,7 +55,7 @@ if __name__ == "__main__":
     print(f"Using dataset:   {dataset_path}")
     print(f"N samples:       {len(dataset)}")
 
-    visualize_distribution = True
+    visualize_distribution = False
     n_distribution_samples = 100
 
     load_weights(model, weights_path, device)
@@ -112,13 +112,13 @@ if __name__ == "__main__":
 
             pred_end_point = outputs['end_point'].squeeze(0).cpu().numpy()   # (3,)
 
-            visualize_action_prediction(
-                start_point=data['start_point'].squeeze(0),
-                end_points=[pred_end_point],
-                start_pc=data['start_pc_unnormalized'],
-                goal_pc=data['goal_pc_unnormalized'],
-                gt_end_point=gt_end_point,
-            )
+            # visualize_action_prediction(
+            #     start_point=data['start_point'].squeeze(0),
+            #     end_points=[pred_end_point],
+            #     start_pc=data['start_pc_unnormalized'],
+            #     goal_pc=data['goal_pc_unnormalized'],
+            #     gt_end_point=gt_end_point,
+            # )
 
             
 
