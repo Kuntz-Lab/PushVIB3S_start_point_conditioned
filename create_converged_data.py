@@ -40,23 +40,25 @@ import numpy as np
 from utils import find_pickle_files
 
 # Source data format: "real" or "sim".
-DATA_TYPE = "sim"
+DATA_TYPE = "real"
 
 # Source data directory to process (original frame, not object frame).
 DATA_DIRS = {
     "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/source_of_truth_original_frame/training",
     "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/original_frame",
+    # "sim": "/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/original_frame" # old sim
 }
 
 # Fraction (0-1) of the source pickle files to convert into no-diff-goal data.
-RATIO_OF_DATA_TO_PROCESS = 0.2
+RATIO_OF_DATA_TO_PROCESS = 1.0
 
 # Random seed used when sampling which files to process.
 SEED = 14
 
 OUTPUT_DIRS = {
-    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/original_frame_no_diff_subsets/seed14_ratio_0.5/training",
-    "sim": f"/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff_subset_original_frame/seed{SEED}_ratio{RATIO_OF_DATA_TO_PROCESS}",
+    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/original_frame/training",
+    "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/original_frame",
+    # "sim": "/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/no_diff/original_frame" # old sim
 }
 
 DATA_DIR = DATA_DIRS[DATA_TYPE]
