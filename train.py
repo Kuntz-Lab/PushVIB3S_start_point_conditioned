@@ -669,7 +669,7 @@ def main() -> None:
     # Set random seed
     set_seed(333)
 
-    run_name_prefix = "realsense_bg0.0005_weight1.5_w_no_diff_data"
+    run_name_prefix = "131126_repeat_nd_lr1e-4"
     if run_name_prefix is None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
@@ -688,7 +688,7 @@ def main() -> None:
         feature_dim=128,
         beta_goal=0.0005, # 0.00001 was used for sim only training
         batch_size=64, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
-        learning_rate=5e-5, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
+        learning_rate=1e-4, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
         num_epochs=600, # 350 usually sufficient for fine/co-training
         seed=334,
         deterministic=False,
@@ -696,12 +696,16 @@ def main() -> None:
         sim_validation=False,  # Set to False to skip sim validation loss/plot
         # REMINDER: the first data source should be the original sim data (it's split 90/10 for sim validation)
         data_dirs=[
-            '/home/britton/PushVIBES/data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data',  # sim
-            '/home/britton/PushVIBES/data/all_good_realsense_data/training',  # real
+            '/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/processed_object_frame',  # sim
+            '/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/object_frame', # sim no diff
+            '/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/object_frame', # old sim
+            '/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/no_diff/object_frame', # old sim no diff
+            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/training',  # real
+            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/object_frame/training' # real no diff
         ],
-        data_source_weights=[1.0, 1.5],  # scale each source's loss (>1.0 emphasizes that source)
-        data_pts_per_epoch=[612, -1],  # 561, -1 is all, 0 skips the source
-        validation_data_dir='/home/britton/PushVIBES/data/all_good_realsense_data/test',
+        data_source_weights=[1.0, 1.0, 1.0, 1.0, 1.5, 1.5],  # scale each source's loss (>1.0 emphasizes that source)
+        data_pts_per_epoch=[492, 148, 120, 36, -1, 184],  # 561, -1 is all, 0 skips the source
+        validation_data_dir='/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/test',
         # pretrained_weights_path='./weights/oriented/new_old_data_mix_checkpoint_noisy_115_0.000462.pt',
         # pretrained_weights_path='checkpoints/deterministic/deterministic_all_simlocal_20260407_161509/latest_model_weights.pt',
         pretrained_weights_path=None, # Set to None to train from scratch
