@@ -667,11 +667,20 @@ class PushVibesTrainer:
 def main() -> None:
     mp.set_start_method('spawn', force=True)
     # Set random seed
-    set_seed(333)
+    # set_seed(333)
 
-    run_name_prefix = "131126_repeat_nd_lr5e-5_2.2"
-    if run_name_prefix is None:
-        run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
+    num_real_per_epoch = 561
+    num_sim_per_epoch = 561
+    og_data_ratio = 0.25
+    no_diff_ratio = 0.0
+    num_new_sim_per_epoch = int(num_sim_per_epoch * (1 - og_data_ratio))
+    num_og_data_per_epoch = int(num_sim_per_epoch * og_data_ratio)
+
+    beta_goal = 0.0005
+    lr = 5e-5
+    real_data_weight = 2.2
+
+    run_name_prefix = f"n_sim{num_sim_per_epoch}_no_diff_r{no_diff_ratio}_b{beta_goal}_lr{lr}_r_wt{real_data_weight}_"
 
     # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
     strategy = STRATEGY_END_POINT
@@ -686,9 +695,9 @@ def main() -> None:
         in_bps=128,
         goalD=7,  # 2, 7
         feature_dim=128,
-        beta_goal=0.0005, # 0.00001 was used for sim only training
+        beta_goal=beta_goal, # 0.00001 was used for sim only training
         batch_size=64, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
-        learning_rate=5e-5, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
+        learning_rate=lr, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
         num_epochs=600, # 350 usually sufficient for fine/co-training
         seed=335,
         deterministic=False,
@@ -700,11 +709,16 @@ def main() -> None:
             '/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/object_frame', # sim no diff
             '/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/object_frame', # old sim
             '/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/no_diff/object_frame', # old sim no diff
-            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/training',  # real
-            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/object_frame/training' # real no diff
+            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/561/object_frame/training',  # real
+            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/561/no_diff/object_frame/training' # real no diff
         ],
-        data_source_weights=[1.0, 1.0, 1.0, 1.0, 2.2, 1.5],  # scale each source's loss (>1.0 emphasizes that source)
-        data_pts_per_epoch=[512, 40, 100, 10, -1, 60],  # 561, -1 is all, 0 skips the source
+        data_source_weights=[1.0, 1.0, 1.0, 1.0, real_data_weight, 1.0],  # scale each source's loss (>1.0 emphasizes that source)
+        data_pts_per_epoch=[num_new_sim_per_epoch,
+                            int(num_new_sim_per_epoch * no_diff_ratio),
+                            num_og_data_per_epoch,
+                            int(num_og_data_per_epoch * no_diff_ratio),
+                            num_real_per_epoch,
+                            int(num_real_per_epoch * no_diff_ratio)],  # 561, -1 is all, 0 skips the source
         validation_data_dir='/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/test',
         # pretrained_weights_path='./weights/oriented/new_old_data_mix_checkpoint_noisy_115_0.000462.pt',
         # pretrained_weights_path='checkpoints/deterministic/deterministic_all_simlocal_20260407_161509/latest_model_weights.pt',
