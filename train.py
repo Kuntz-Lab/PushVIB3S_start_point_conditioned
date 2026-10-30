@@ -556,7 +556,7 @@ class PushVibesTrainer:
         patience = 150
         best_val_loss = float('inf')
         epochs_without_improvement = 0
-        min_delta = 1e-6
+        min_delta = 1e-7
         use_sim_for_best = (
             self.sim_validation
             and self.data_pts_per_epoch[0] == -1
@@ -669,7 +669,7 @@ def main() -> None:
     # Set random seed
     set_seed(333)
 
-    run_name_prefix = "131126_repeat_nd_lr1e-4"
+    run_name_prefix = "131126_repeat_nd_lr5e-5_2.2"
     if run_name_prefix is None:
         run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
 
@@ -688,9 +688,9 @@ def main() -> None:
         feature_dim=128,
         beta_goal=0.0005, # 0.00001 was used for sim only training
         batch_size=64, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
-        learning_rate=1e-4, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
+        learning_rate=5e-5, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
         num_epochs=600, # 350 usually sufficient for fine/co-training
-        seed=334,
+        seed=335,
         deterministic=False,
         use_directional_bps=True,
         sim_validation=False,  # Set to False to skip sim validation loss/plot
@@ -703,8 +703,8 @@ def main() -> None:
             '/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/training',  # real
             '/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/object_frame/training' # real no diff
         ],
-        data_source_weights=[1.0, 1.0, 1.0, 1.0, 1.5, 1.5],  # scale each source's loss (>1.0 emphasizes that source)
-        data_pts_per_epoch=[492, 148, 120, 36, -1, 184],  # 561, -1 is all, 0 skips the source
+        data_source_weights=[1.0, 1.0, 1.0, 1.0, 2.2, 1.5],  # scale each source's loss (>1.0 emphasizes that source)
+        data_pts_per_epoch=[512, 40, 100, 10, -1, 60],  # 561, -1 is all, 0 skips the source
         validation_data_dir='/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/test',
         # pretrained_weights_path='./weights/oriented/new_old_data_mix_checkpoint_noisy_115_0.000462.pt',
         # pretrained_weights_path='checkpoints/deterministic/deterministic_all_simlocal_20260407_161509/latest_model_weights.pt',
