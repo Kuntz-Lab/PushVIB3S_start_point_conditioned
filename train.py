@@ -1,7 +1,6 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
-import torch.nn.functional as F
 import random
 import numpy as np
 import os
@@ -17,7 +16,6 @@ from PushVIB3S_start_point_conditioned import (
     PushVIB3S_start_point_conditioned,
     STRATEGY_END_POINT,
     STRATEGY_DISPLACEMENT,
-    STRATEGY_DIRECTION_MAGNITUDE,
     VALID_STRATEGIES,
     ENCODER_BPS,
     ENCODER_PTV3,
@@ -32,6 +30,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from utils import set_seed, save_val_error_plot, save_val_loss_plot
+from mixed_batches import build_mixed_train_loader, weighted_mse
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +73,8 @@ class PushVibesTrainer:
         order: str = "z",               # PTv3 serialization curve order (encoder_type="ptv3" only)
         shuffle_orders: bool = False,   # whether PTv3 shuffles between serialization orders (encoder_type="ptv3" only)
         enable_flash: bool = False,     # whether PTv3 attention uses FlashAttention (encoder_type="ptv3" only)
+        meter_space_loss: bool = False,  # True: reconstruction MSE in meters; False: in per-sample normalized space
+        mixed_batches: bool = False,     # True: shuffle all sources into the same batches, per-sample source weights; False: one batch per source per step
     ):
         if strategy not in VALID_STRATEGIES:
             raise ValueError(f"strategy must be one of {VALID_STRATEGIES}, got {strategy!r}")
@@ -85,6 +86,8 @@ class PushVibesTrainer:
         self.order = order
         self.shuffle_orders = shuffle_orders
         self.enable_flash = enable_flash
+        self.meter_space_loss = meter_space_loss
+        self.mixed_batches = mixed_batches
         self.n_neurons = n_neurons
         self.in_bps = in_bps
         self.goalD = goalD
@@ -206,6 +209,13 @@ class PushVibesTrainer:
             persistent_workers=True
         )
 
+        if self.mixed_batches:
+            # One loader over all sources; source weights are applied per sample in _compute_losses
+            mixed_loader = build_mixed_train_loader(self.train_datasets, self.data_source_weights,
+                                                    self.data_pts_per_epoch, self.batch_size)
+            self.train_loaders = [(mixed_loader, 1.0)]
+            return
+
         # Built once and reused every epoch so persistent workers don't get respawned
         # each epoch.
         self.train_loaders: list[tuple[DataLoader, float]] = [
@@ -292,6 +302,8 @@ class PushVibesTrainer:
             "order": self.order,
             "shuffle_orders": self.shuffle_orders,
             "enable_flash": self.enable_flash,
+            "meter_space_loss": self.meter_space_loss,
+            "mixed_batches": self.mixed_batches,
         }
 
         out_path = self.checkpoint_dir / "a_run_config.json"
@@ -313,38 +325,24 @@ class PushVibesTrainer:
         return None
 
 
-    def _reconstruction_loss(
-        self,
-        results: Dict[str, torch.Tensor],
-        start_point_normalized: torch.Tensor,
-        target_end_point_normalized: torch.Tensor,
-    ) -> torch.Tensor:
-        """Strategy-dependent reconstruction loss, computed in normalized space."""
-        target_displacement = target_end_point_normalized - start_point_normalized
+    def _push_pred_target(self, results: Dict[str, torch.Tensor], batch: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Predicted and target push for the reconstruction loss, per self.strategy, in meters or
+        normalized space (per meter_space_loss).
+        Inputs: results (model output dict), batch (dataset batch dict). Output: (pred, target), each [B, 3]"""
+        if self.meter_space_loss:
+            start_point = batch['start_point'].squeeze(1)
+            pred_end_point, target_end_point = results['end_point'], batch['end_point'].squeeze(1)
+            if self.strategy == STRATEGY_DISPLACEMENT:
+                return pred_end_point - start_point, target_end_point - start_point
+            return pred_end_point, target_end_point
 
+        start_point_normalized = batch['start_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
+        target_end_point_normalized = batch['end_point_normalized'].squeeze(1)
         if self.strategy == STRATEGY_DISPLACEMENT:
-            return self.l2_loss(results['normalized_displacement'], target_displacement)
-
-        if self.strategy == STRATEGY_DIRECTION_MAGNITUDE:
-            target_magnitude = torch.norm(target_displacement, dim=1)
-            zero_magnitude = target_magnitude < 1e-8
-
-            target_direction = target_displacement / target_magnitude.clamp(min=1e-8).unsqueeze(1)
-            # Direction is undefined when there's no ground-truth displacement (e.g.
-            # no-diff-goal samples): substitute the (detached) predicted direction as
-            # the target for those rows, so they contribute exactly zero direction
-            # loss and zero gradient instead of an arbitrary constant penalty from
-            # the degenerate zero-vector target.
-            target_direction = torch.where(
-                zero_magnitude.unsqueeze(1), results['direction'].detach(), target_direction
-            )
-
-            direction_loss = (1 - F.cosine_similarity(results['direction'], target_direction, dim=1)).mean()
-            magnitude_loss = self.l2_loss(results['normalized_magnitude'], target_magnitude)
-            return direction_loss + magnitude_loss
+            return results['normalized_displacement'], target_end_point_normalized - start_point_normalized
 
         # STRATEGY_END_POINT
-        return self.l2_loss(results['normalized_end_point'], target_end_point_normalized)
+        return results['normalized_end_point'], target_end_point_normalized
 
     def _model_inputs(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
         """Pick the (start, goal) tensors PushDataset produced for self.encoder_type: BPS
@@ -366,17 +364,18 @@ class PushVibesTrainer:
             x_max=batch['x_max']       # Pass the max for denormalization
         )
 
-        # Loss is computed in normalized space
-        target_end_point = batch['end_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
-
-        # Reconstruction loss, per the selected strategy
-        end_point_loss = self._reconstruction_loss(results, start_point_normalized, target_end_point)
+        # Reconstruction loss, per the selected strategy (meters or normalized space, per meter_space_loss)
+        pred_push, target_push = self._push_pred_target(results, batch)
+        end_point_loss = self.l2_loss(pred_push, target_push)
 
         # KL divergence losses
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
         total_loss = end_point_loss + effective_kl_loss
+        if self.mixed_batches:
+            # Each sample's reconstruction loss scaled by its source weight; KL is batch-level, so unweighted
+            total_loss = weighted_mse(pred_push, target_push, batch['source_weight']) + effective_kl_loss
 
         return {
             'total_loss': total_loss,
@@ -472,15 +471,13 @@ class PushVibesTrainer:
             x_max=batch['x_max']       # Pass the max for denormalization
         )
 
-        # Loss is computed in normalized space, to match train_step
-        target_end_point_normalized = batch['end_point_normalized'].squeeze(1)
-
         # KL divergence loss
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
-        # Reconstruction loss, per the selected strategy
-        end_point_loss = self._reconstruction_loss(results, start_point_normalized, target_end_point_normalized)
+        # Reconstruction loss, in the same space and strategy as train_step
+        pred_push, target_push = self._push_pred_target(results, batch)
+        end_point_loss = self.l2_loss(pred_push, target_push)
 
         total_loss = end_point_loss + effective_kl_loss
 
@@ -679,10 +676,12 @@ def main() -> None:
     beta_goal = 0.0005
     lr = 5e-5
     real_data_weight = 2.2
+    meter_space_loss = False  # True: reconstruction loss in meters; False: per-sample normalized loss
+    mixed_batches = False  # True: all sources shuffled into the same batches; False: one batch per source per step
 
     run_name_prefix = f"n_sim{num_sim_per_epoch}_no_diff_r{no_diff_ratio}_b{beta_goal}_lr{lr}_r_wt{real_data_weight}_"
 
-    # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
+    # STRATEGY_END_POINT or STRATEGY_DISPLACEMENT
     strategy = STRATEGY_END_POINT
 
     # ENCODER_BPS or ENCODER_PTV3 -- everything else in this config is shared by both;
@@ -728,6 +727,8 @@ def main() -> None:
         encoder_type=encoder_type,
         # grid_size/order/shuffle_orders/enable_flash: PTv3-only, left at their defaults
         # (encoder_type="ptv3"); irrelevant when encoder_type="bps".
+        meter_space_loss=meter_space_loss,
+        mixed_batches=mixed_batches,
     )
     trainer.train()
 
