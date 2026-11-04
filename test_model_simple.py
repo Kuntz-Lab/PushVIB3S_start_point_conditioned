@@ -14,7 +14,7 @@ if __name__ == "__main__":
     # ENCODER_BPS or ENCODER_PTV3 -- must match how weights_path below was trained.
     encoder_type = ENCODER_BPS
 
-    dataset_path = "/home/britton/PushVIBES/data/all_good_realsense_data/test"
+    dataset_path = "/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/test"
 
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.08local_20260724_142009/checkpoint_200_0.035985.pt" #
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/checkpoint_-1_0.031510.pt"
@@ -22,7 +22,8 @@ if __name__ == "__main__":
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.005local_20260724_153206/checkpoint_280_0.030861.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5local_20260724_165655/checkpoint_592_0.027443.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_datalocal_20260727_165643/checkpoint_368_0.021833.pt"
-    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_dataend_point_bps_local_20260827_131126/checkpoint_429_0.020384.pt"
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_dataend_point_bps_local_20260827_131126/checkpoint_429_0.020384.pt"
+    weights_path = "/home/britton/retraction_ws/src/PushVIB3S_start_point_conditioned/checkpoints/c103_real561_n_sim4000_no_diff_r0.0_b0.0002_lr0.0001_r_wt22_end_point_bps_local_20261101_003017/checkpoint_107_0.018598.pt"
 
     deterministic_farthest_point_sampling = True
     n_neurons = 512
@@ -55,7 +56,7 @@ if __name__ == "__main__":
     print(f"Using dataset:   {dataset_path}")
     print(f"N samples:       {len(dataset)}")
 
-    visualize_distribution = False
+    visualize_distribution = True
     n_distribution_samples = 100
 
     load_weights(model, weights_path, device)
@@ -112,13 +113,13 @@ if __name__ == "__main__":
 
             pred_end_point = outputs['end_point'].squeeze(0).cpu().numpy()   # (3,)
 
-            # visualize_action_prediction(
-            #     start_point=data['start_point'].squeeze(0),
-            #     end_points=[pred_end_point],
-            #     start_pc=data['start_pc_unnormalized'],
-            #     goal_pc=data['goal_pc_unnormalized'],
-            #     gt_end_point=gt_end_point,
-            # )
+            visualize_action_prediction(
+                start_point=data['start_point'].squeeze(0),
+                end_points=[pred_end_point],
+                start_pc=data['start_pc_unnormalized'],
+                goal_pc=data['goal_pc_unnormalized'],
+                gt_end_point=gt_end_point,
+            )
 
             
 
