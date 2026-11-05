@@ -12,9 +12,9 @@ if __name__ == "__main__":
     set_seed(seed)
 
     # ENCODER_BPS or ENCODER_PTV3 -- must match how weights_path below was trained.
-    encoder_type = ENCODER_BPS
+    encoder_type = ENCODER_PTV3
 
-    dataset_path = "/home/britton/PushVIBES/data/all_good_realsense_data/test"
+    dataset_path = "/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/test"
 
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.08local_20260724_142009/checkpoint_200_0.035985.pt" #
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.01local_20260724_135500/checkpoint_-1_0.031510.pt"
@@ -22,7 +22,9 @@ if __name__ == "__main__":
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.005local_20260724_153206/checkpoint_280_0.030861.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5local_20260724_165655/checkpoint_592_0.027443.pt"
     # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_datalocal_20260727_165643/checkpoint_368_0.021833.pt"
-    weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_dataend_point_bps_local_20260827_131126/checkpoint_429_0.020384.pt"
+    # weights_path = "/home/britton/PushVIB3S_start_point_conditioned/checkpoints/realsense_bg0.0005_weight1.5_w_no_diff_dataend_point_bps_local_20260827_131126/checkpoint_429_0.020384.pt"
+    # weights_path = "/home/britton/retraction_ws/src/PushVIB3S_start_point_conditioned/checkpoints/c103_real561_n_sim4000_no_diff_r0.0_b0.0002_lr0.0001_r_wt22_end_point_bps_local_20261101_003017/checkpoint_107_0.018598.pt"
+    weights_path = "/home/britton/retraction_ws/src/PushVIB3S_start_point_conditioned/checkpoints/c148_real561_n_sim4000_no_diff_r0.0_b0.0002_lr2.5e-05_r_wt22_end_point_ptv3_local_20261104_215249/checkpoint_23_0.020609.pt"
 
     deterministic_farthest_point_sampling = True
     n_neurons = 512

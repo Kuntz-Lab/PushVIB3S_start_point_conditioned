@@ -1,7 +1,6 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
-import torch.nn.functional as F
 import random
 import numpy as np
 import os
@@ -17,7 +16,6 @@ from PushVIB3S_start_point_conditioned import (
     PushVIB3S_start_point_conditioned,
     STRATEGY_END_POINT,
     STRATEGY_DISPLACEMENT,
-    STRATEGY_DIRECTION_MAGNITUDE,
     VALID_STRATEGIES,
     ENCODER_BPS,
     ENCODER_PTV3,
@@ -32,6 +30,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from utils import set_seed, save_val_error_plot, save_val_loss_plot
+from mixed_batches import build_mixed_train_loader, weighted_mse
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -62,13 +61,11 @@ class PushVibesTrainer:
         deterministic: bool = False,
         use_directional_bps: bool = True,
         sim_validation: bool = True,
-        sim_data_dir: str = None,
-        real_data_dir: str = None,
+        data_dirs: list[str] = None,              # training sources; the first is split 90/10 for sim validation, so it should be the original sim data
+        data_source_weights: list[float] = None,  # per-source loss weight (>1.0 emphasizes that source)
+        data_pts_per_epoch: list[int] = None,     # per-source points per epoch; -1 means use all data, 0 skips the source
         validation_data_dir: str = None,
         pretrained_weights_path: str = None,
-        sim_data_pts_per_epoch: int = -1, # -1 means use all data, otherwise specify how many points to use per epoch
-        real_data_pts_per_epoch: int = -1, # -1 means use all data, otherwise specify how many points to use per epoch
-        real_loss_weight: float = 1.0,     # scale real-data loss relative to sim (>1.0 emphasizes real)
         run_name_prefix: str = "",
         strategy: str = STRATEGY_END_POINT,
         encoder_type: str = ENCODER_BPS,
@@ -76,6 +73,8 @@ class PushVibesTrainer:
         order: str = "z",               # PTv3 serialization curve order (encoder_type="ptv3" only)
         shuffle_orders: bool = False,   # whether PTv3 shuffles between serialization orders (encoder_type="ptv3" only)
         enable_flash: bool = False,     # whether PTv3 attention uses FlashAttention (encoder_type="ptv3" only)
+        meter_space_loss: bool = False,  # True: reconstruction MSE in meters; False: in per-sample normalized space
+        mixed_batches: bool = False,     # True: shuffle all sources into the same batches, per-sample source weights; False: one batch per source per step
     ):
         if strategy not in VALID_STRATEGIES:
             raise ValueError(f"strategy must be one of {VALID_STRATEGIES}, got {strategy!r}")
@@ -87,6 +86,8 @@ class PushVibesTrainer:
         self.order = order
         self.shuffle_orders = shuffle_orders
         self.enable_flash = enable_flash
+        self.meter_space_loss = meter_space_loss
+        self.mixed_batches = mixed_batches
         self.n_neurons = n_neurons
         self.in_bps = in_bps
         self.goalD = goalD
@@ -99,13 +100,13 @@ class PushVibesTrainer:
         self.deterministic = deterministic
         self.use_directional_bps = use_directional_bps
         self.sim_validation = sim_validation
-        self.sim_data_dir = sim_data_dir
-        self.real_data_dir = real_data_dir
+        if not (len(data_dirs) == len(data_source_weights) == len(data_pts_per_epoch)):
+            raise ValueError("data_dirs, data_source_weights and data_pts_per_epoch must have the same length.")
+        self.data_dirs = data_dirs
+        self.data_source_weights = data_source_weights
+        self.data_pts_per_epoch = data_pts_per_epoch
         self.validation_data_dir = validation_data_dir
         self.pretrained_weights_path = pretrained_weights_path
-        self.sim_data_pts_per_epoch = sim_data_pts_per_epoch
-        self.real_data_pts_per_epoch = real_data_pts_per_epoch
-        self.real_loss_weight = real_loss_weight
         self.device = torch.device('cuda')
         self.run_name_prefix = run_name_prefix
         self.run_name = self._get_run_name()
@@ -158,9 +159,9 @@ class PushVibesTrainer:
 
     def _init_dataset(self) -> None:
 
-        # Split sim dataset into train and validation
+        # First source is split 90/10; its 10% is the sim validation set
         full_dataset = PushDataset(
-            data_dir=self.sim_data_dir,
+            data_dir=self.data_dirs[0],
             use_directional_bps=self.use_directional_bps,
             encoder_type=self.encoder_type,
         )
@@ -187,12 +188,11 @@ class PushVibesTrainer:
                 persistent_workers=True
             )
 
-        # if self.pretrained_weights_path is not None or self.sim_data_pts_per_epoch == 0:
-        self.real_train_dataset = PushDataset(
-            data_dir=self.real_data_dir,
-            use_directional_bps=self.use_directional_bps,
-            encoder_type=self.encoder_type,
-        )
+        # Remaining sources are used in full. Built before the val dataset to keep the original construction order.
+        self.train_datasets = [self.sim_train_dataset] + [
+            PushDataset(data_dir=data_dir, use_directional_bps=self.use_directional_bps, encoder_type=self.encoder_type)
+            for data_dir in self.data_dirs[1:]
+        ]
 
         self.real_val_dataset = PushDataset(
             data_dir=self.validation_data_dir,
@@ -209,16 +209,23 @@ class PushVibesTrainer:
             persistent_workers=True
         )
 
+        if self.mixed_batches:
+            # One loader over all sources; source weights are applied per sample in _compute_losses
+            mixed_loader = build_mixed_train_loader(self.train_datasets, self.data_source_weights,
+                                                    self.data_pts_per_epoch, self.batch_size)
+            self.train_loaders = [(mixed_loader, 1.0)]
+            return
+
         # Built once and reused every epoch so persistent workers don't get respawned
         # each epoch.
-        self.train_loaders: list[tuple[DataLoader, float]] = []
-        if self.sim_data_pts_per_epoch != 0:
-            self.train_loaders.append((self._build_train_loader(self.sim_train_dataset, self.sim_data_pts_per_epoch), 1.0))
-        if self.real_data_pts_per_epoch != 0:
-            self.train_loaders.append((self._build_train_loader(self.real_train_dataset, self.real_data_pts_per_epoch), self.real_loss_weight))
+        self.train_loaders: list[tuple[DataLoader, float]] = [
+            (self._build_train_loader(dataset, pts), weight)
+            for dataset, pts, weight in zip(self.train_datasets, self.data_pts_per_epoch, self.data_source_weights)
+            if pts != 0
+        ]
 
         if not self.train_loaders:
-            raise ValueError("No training data selected. Set sim_data_pts_per_epoch or real_data_pts_per_epoch > 0.")
+            raise ValueError("No training data selected. Set at least one data_pts_per_epoch entry to nonzero.")
 
     def _build_train_loader(self, dataset: torch.utils.data.Dataset, pts_per_epoch: int) -> DataLoader:
         # Both shuffle=True and RandomSampler re-draw fresh indices every time the loader
@@ -284,19 +291,19 @@ class PushVibesTrainer:
             "deterministic": self.deterministic,
             "use_directional_bps": self.use_directional_bps,
             "sim_validation": self.sim_validation,
-            "sim_data_dir": self.sim_data_dir,
-            "real_data_dir": self.real_data_dir,
+            "data_dirs": self.data_dirs,
+            "data_source_weights": self.data_source_weights,
+            "data_pts_per_epoch": self.data_pts_per_epoch,
             "validation_data_dir": self.validation_data_dir,
             "pretrained_weights_path": self.pretrained_weights_path,
-            "sim_data_pts_per_epoch": self.sim_data_pts_per_epoch,
-            "real_data_pts_per_epoch": self.real_data_pts_per_epoch,
-            "real_loss_weight": self.real_loss_weight,
             "strategy": self.strategy,
             "encoder_type": self.encoder_type,
             "grid_size": self.grid_size,
             "order": self.order,
             "shuffle_orders": self.shuffle_orders,
             "enable_flash": self.enable_flash,
+            "meter_space_loss": self.meter_space_loss,
+            "mixed_batches": self.mixed_batches,
         }
 
         out_path = self.checkpoint_dir / "a_run_config.json"
@@ -318,38 +325,24 @@ class PushVibesTrainer:
         return None
 
 
-    def _reconstruction_loss(
-        self,
-        results: Dict[str, torch.Tensor],
-        start_point_normalized: torch.Tensor,
-        target_end_point_normalized: torch.Tensor,
-    ) -> torch.Tensor:
-        """Strategy-dependent reconstruction loss, computed in normalized space."""
-        target_displacement = target_end_point_normalized - start_point_normalized
+    def _push_pred_target(self, results: Dict[str, torch.Tensor], batch: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Predicted and target push for the reconstruction loss, per self.strategy, in meters or
+        normalized space (per meter_space_loss).
+        Inputs: results (model output dict), batch (dataset batch dict). Output: (pred, target), each [B, 3]"""
+        if self.meter_space_loss:
+            start_point = batch['start_point'].squeeze(1)
+            pred_end_point, target_end_point = results['end_point'], batch['end_point'].squeeze(1)
+            if self.strategy == STRATEGY_DISPLACEMENT:
+                return pred_end_point - start_point, target_end_point - start_point
+            return pred_end_point, target_end_point
 
+        start_point_normalized = batch['start_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
+        target_end_point_normalized = batch['end_point_normalized'].squeeze(1)
         if self.strategy == STRATEGY_DISPLACEMENT:
-            return self.l2_loss(results['normalized_displacement'], target_displacement)
-
-        if self.strategy == STRATEGY_DIRECTION_MAGNITUDE:
-            target_magnitude = torch.norm(target_displacement, dim=1)
-            zero_magnitude = target_magnitude < 1e-8
-
-            target_direction = target_displacement / target_magnitude.clamp(min=1e-8).unsqueeze(1)
-            # Direction is undefined when there's no ground-truth displacement (e.g.
-            # no-diff-goal samples): substitute the (detached) predicted direction as
-            # the target for those rows, so they contribute exactly zero direction
-            # loss and zero gradient instead of an arbitrary constant penalty from
-            # the degenerate zero-vector target.
-            target_direction = torch.where(
-                zero_magnitude.unsqueeze(1), results['direction'].detach(), target_direction
-            )
-
-            direction_loss = (1 - F.cosine_similarity(results['direction'], target_direction, dim=1)).mean()
-            magnitude_loss = self.l2_loss(results['normalized_magnitude'], target_magnitude)
-            return direction_loss + magnitude_loss
+            return results['normalized_displacement'], target_end_point_normalized - start_point_normalized
 
         # STRATEGY_END_POINT
-        return self.l2_loss(results['normalized_end_point'], target_end_point_normalized)
+        return results['normalized_end_point'], target_end_point_normalized
 
     def _model_inputs(self, batch: Dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
         """Pick the (start, goal) tensors PushDataset produced for self.encoder_type: BPS
@@ -371,17 +364,18 @@ class PushVibesTrainer:
             x_max=batch['x_max']       # Pass the max for denormalization
         )
 
-        # Loss is computed in normalized space
-        target_end_point = batch['end_point_normalized'].squeeze(1)  # From [B,1,3] to [B,3]
-
-        # Reconstruction loss, per the selected strategy
-        end_point_loss = self._reconstruction_loss(results, start_point_normalized, target_end_point)
+        # Reconstruction loss, per the selected strategy (meters or normalized space, per meter_space_loss)
+        pred_push, target_push = self._push_pred_target(results, batch)
+        end_point_loss = self.l2_loss(pred_push, target_push)
 
         # KL divergence losses
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
         total_loss = end_point_loss + effective_kl_loss
+        if self.mixed_batches:
+            # Each sample's reconstruction loss scaled by its source weight; KL is batch-level, so unweighted
+            total_loss = weighted_mse(pred_push, target_push, batch['source_weight']) + effective_kl_loss
 
         return {
             'total_loss': total_loss,
@@ -477,15 +471,13 @@ class PushVibesTrainer:
             x_max=batch['x_max']       # Pass the max for denormalization
         )
 
-        # Loss is computed in normalized space, to match train_step
-        target_end_point_normalized = batch['end_point_normalized'].squeeze(1)
-
         # KL divergence loss
         kl_loss = results['kl_goal']
         effective_kl_loss = self.beta_goal * kl_loss  # KL loss as actually weighted into total_loss
 
-        # Reconstruction loss, per the selected strategy
-        end_point_loss = self._reconstruction_loss(results, start_point_normalized, target_end_point_normalized)
+        # Reconstruction loss, in the same space and strategy as train_step
+        pred_push, target_push = self._push_pred_target(results, batch)
+        end_point_loss = self.l2_loss(pred_push, target_push)
 
         total_loss = end_point_loss + effective_kl_loss
 
@@ -561,8 +553,12 @@ class PushVibesTrainer:
         patience = 150
         best_val_loss = float('inf')
         epochs_without_improvement = 0
-        min_delta = 1e-6
-        use_sim_for_best = self.sim_validation and self.sim_data_pts_per_epoch == -1 and self.real_data_pts_per_epoch == 0
+        min_delta = 1e-7
+        use_sim_for_best = (
+            self.sim_validation
+            and self.data_pts_per_epoch[0] == -1
+            and all(pts == 0 for pts in self.data_pts_per_epoch[1:])
+        )
         # beta_goal is 0 during these epochs (see the schedule below), so their val loss has
         # no KL term and isn't comparable to post-warmup losses. Best-weight tracking and the
         # LR scheduler are both deferred until beta_goal reaches its target value, so an
@@ -668,13 +664,24 @@ class PushVibesTrainer:
 def main() -> None:
     mp.set_start_method('spawn', force=True)
     # Set random seed
-    set_seed(333)
+    # set_seed(333)
 
-    run_name_prefix = "realsense_bg0.0005_weight1.5_w_no_diff_data"
-    if run_name_prefix is None:
-        run_name_prefix = input("Enter a run name prefix (or leave blank for none): ").strip()
+    num_real_per_epoch = 561
+    num_sim_per_epoch = 561
+    og_data_ratio = 0.25
+    no_diff_ratio = 0.0
+    num_new_sim_per_epoch = int(num_sim_per_epoch * (1 - og_data_ratio))
+    num_og_data_per_epoch = int(num_sim_per_epoch * og_data_ratio)
 
-    # STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, or STRATEGY_DIRECTION_MAGNITUDE
+    beta_goal = 0.0005
+    lr = 5e-5
+    real_data_weight = 2.2
+    meter_space_loss = False  # True: reconstruction loss in meters; False: per-sample normalized loss
+    mixed_batches = False  # True: all sources shuffled into the same batches; False: one batch per source per step
+
+    run_name_prefix = f"n_sim{num_sim_per_epoch}_no_diff_r{no_diff_ratio}_b{beta_goal}_lr{lr}_r_wt{real_data_weight}_"
+
+    # STRATEGY_END_POINT or STRATEGY_DISPLACEMENT
     strategy = STRATEGY_END_POINT
 
     # ENCODER_BPS or ENCODER_PTV3 -- everything else in this config is shared by both;
@@ -687,28 +694,41 @@ def main() -> None:
         in_bps=128,
         goalD=7,  # 2, 7
         feature_dim=128,
-        beta_goal=0.0005, # 0.00001 was used for sim only training
+        beta_goal=beta_goal, # 0.00001 was used for sim only training
         batch_size=64, #fine tuning does better with 64 than 200  # 512, 2048 was used for sim training
-        learning_rate=5e-5, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
+        learning_rate=lr, # 1e-4 was used for sim training, 1e-4 cotrain, 1e-5 / 8e-5 was used for finetuning
         num_epochs=600, # 350 usually sufficient for fine/co-training
-        seed=334,
+        seed=335,
         deterministic=False,
         use_directional_bps=True,
         sim_validation=False,  # Set to False to skip sim validation loss/plot
-        sim_data_dir='/home/britton/PushVIBES/data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data',
-        real_data_dir='/home/britton/PushVIBES/data/all_good_realsense_data/training',
-        validation_data_dir='/home/britton/PushVIBES/data/all_good_realsense_data/test',
+        # REMINDER: the first data source should be the original sim data (it's split 90/10 for sim validation)
+        data_dirs=[
+            '/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/processed_object_frame',  # sim
+            '/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/object_frame', # sim no diff
+            '/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/object_frame', # old sim
+            '/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/no_diff/object_frame', # old sim no diff
+            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/561/object_frame/training',  # real
+            '/home/britton/data/PushVIBES/PushVIBES_realworld_data/561/no_diff/object_frame/training' # real no diff
+        ],
+        data_source_weights=[1.0, 1.0, 1.0, 1.0, real_data_weight, 1.0],  # scale each source's loss (>1.0 emphasizes that source)
+        data_pts_per_epoch=[num_new_sim_per_epoch,
+                            int(num_new_sim_per_epoch * no_diff_ratio),
+                            num_og_data_per_epoch,
+                            int(num_og_data_per_epoch * no_diff_ratio),
+                            num_real_per_epoch,
+                            int(num_real_per_epoch * no_diff_ratio)],  # 561, -1 is all, 0 skips the source
+        validation_data_dir='/home/britton/data/PushVIBES/PushVIBES_realworld_data/object_frame/test',
         # pretrained_weights_path='./weights/oriented/new_old_data_mix_checkpoint_noisy_115_0.000462.pt',
         # pretrained_weights_path='checkpoints/deterministic/deterministic_all_simlocal_20260407_161509/latest_model_weights.pt',
         pretrained_weights_path=None, # Set to None to train from scratch
-        sim_data_pts_per_epoch=612, # 561
-        real_data_pts_per_epoch=-1, # 561, -1 is all
-        real_loss_weight=1.5,
         run_name_prefix=run_name_prefix,
         strategy=strategy,
         encoder_type=encoder_type,
         # grid_size/order/shuffle_orders/enable_flash: PTv3-only, left at their defaults
         # (encoder_type="ptv3"); irrelevant when encoder_type="bps".
+        meter_space_loss=meter_space_loss,
+        mixed_batches=mixed_batches,
     )
     trainer.train()
 

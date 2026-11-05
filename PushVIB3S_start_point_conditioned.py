@@ -8,8 +8,18 @@ from bps import denormalize_torch
 # loss is computed for them (see PushVibesTrainer in train.py for the loss side).
 STRATEGY_END_POINT = "end_point"                  # predict the absolute end point directly, in the same frame as the input point clouds (object frame and normalized)
 STRATEGY_DISPLACEMENT = "displacement"            # predict start -> end displacement
-STRATEGY_DIRECTION_MAGNITUDE = "direction_magnitude"  # predict a unit direction vector and a scalar magnitude
-VALID_STRATEGIES = (STRATEGY_END_POINT, STRATEGY_DISPLACEMENT, STRATEGY_DIRECTION_MAGNITUDE)
+VALID_STRATEGIES = (STRATEGY_END_POINT, STRATEGY_DISPLACEMENT)
+
+# Heads of the removed direction_magnitude strategy. Older checkpoints still contain their weights,
+# which _drop_removed_head_weights discards on load so those checkpoints keep loading strictly.
+REMOVED_HEAD_PREFIXES = ("direction_head.", "magnitude_head.")
+
+
+def _drop_removed_head_weights(module, state_dict, prefix, *args):
+    """load_state_dict pre-hook: delete REMOVED_HEAD_PREFIXES weights from state_dict in place.
+    Inputs: module (nn.Module), state_dict (dict[str, Tensor]), prefix (str, this module's key prefix). Output: none"""
+    for key in [k for k in state_dict if k.startswith(tuple(prefix + p for p in REMOVED_HEAD_PREFIXES))]:
+        del state_dict[key]
 
 # Point-cloud encoder options. "bps" is the original Basis Point Set encoding (a fixed
 # linear+ResBlock stack over precomputed BPS vectors). "ptv3" swaps in a PointTransformerV3
@@ -147,10 +157,9 @@ class PushVIB3S_start_point_conditioned(nn.Module):
             nn.BatchNorm1d(128)
         )
         
-        # Prediction heads
+        # Prediction head
         self.end_point_head = nn.Linear(128, 3)  # xyz end point (normalized), or displacement for STRATEGY_DISPLACEMENT
-        self.direction_head = nn.Linear(128, 3)  # unit push direction (normalized), used by STRATEGY_DIRECTION_MAGNITUDE
-        self.magnitude_head = nn.Linear(128, 1)  # scalar push magnitude (softplus'd to stay non-negative)
+        self.register_load_state_dict_pre_hook(_drop_removed_head_weights)
         print(f"[PushVIB3S_start_point_conditioned __init__] Model initialization complete.")
 
     @staticmethod
@@ -187,29 +196,20 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         return self.start_encoder(self._to_ptv3_input(start_input))  # ENCODER_PTV3
 
     def _predict_from_mlp_output(self, mlp_output, start_point_normalized):
-        """Run all three prediction heads and combine them per self.strategy.
-
-        Always computes the direction/magnitude heads (and the raw end_point_head
-        output) regardless of strategy, so their weights exist and can be inspected
-        even when unused for training -- only the combination logic below depends on
-        self.strategy. Returns (normalized_end_point, normalized_displacement,
-        direction, normalized_magnitude), all in normalized space.
-        """
+        """Run the prediction head and read its output per self.strategy (end point, or displacement
+        added to the start point).
+        Inputs: mlp_output ([B, 128]), start_point_normalized ([B, 3]).
+        Output: (normalized_end_point, normalized_displacement), each [B, 3], in normalized space"""
         raw_end_point_head_output = self.end_point_head(mlp_output)  # [batch, 3]
-        direction = F.normalize(self.direction_head(mlp_output), dim=1)  # [batch, 3], unit vectors
-        magnitude = F.softplus(self.magnitude_head(mlp_output)).squeeze(-1)  # [batch], >= 0
 
         if self.strategy == STRATEGY_DISPLACEMENT:
             normalized_displacement = raw_end_point_head_output
-            normalized_end_point = start_point_normalized + normalized_displacement
-        elif self.strategy == STRATEGY_DIRECTION_MAGNITUDE:
-            normalized_displacement = direction * magnitude.unsqueeze(-1)
             normalized_end_point = start_point_normalized + normalized_displacement
         else:  # STRATEGY_END_POINT
             normalized_end_point = raw_end_point_head_output
             normalized_displacement = normalized_end_point - start_point_normalized
 
-        return normalized_end_point, normalized_displacement, direction, magnitude
+        return normalized_end_point, normalized_displacement
 
     def forward(self, start_input, goal_input, start_point, x_mean=None, x_max=None):
         """
@@ -274,7 +274,7 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         if x_max.dim() > 2:
             x_max = x_max.squeeze(1)
 
-        end_point, normalized_displacement, direction, normalized_magnitude = self._predict_from_mlp_output(
+        end_point, normalized_displacement = self._predict_from_mlp_output(
             mlp_output, start_point
         )
 
@@ -290,8 +290,6 @@ class PushVIB3S_start_point_conditioned(nn.Module):
                     "end_point": end_point_final,
                     "normalized_end_point": end_point,
                     "normalized_displacement": normalized_displacement,
-                    "direction": direction,
-                    "normalized_magnitude": normalized_magnitude,
                     "goal_mu": goal_mu,
                     "goal_logvar": goal_logvar,
                     "kl_goal": kl_goal,
@@ -349,7 +347,7 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         start_point_raw_flat = start_point.repeat_interleave(num_samples, dim=0)  # (B*S, 3), normalized
 
         combined = torch.cat([start_feature_flat, goal_features_flat, start_point_flat], dim=1)
-        end_points_norm, _, _, _ = self._predict_from_mlp_output(self.mlp(combined), start_point_raw_flat)  # (B*S, 3)
+        end_points_norm, _ = self._predict_from_mlp_output(self.mlp(combined), start_point_raw_flat)  # (B*S, 3)
 
         x_mean_flat = x_mean.repeat_interleave(num_samples, dim=0)  # (B*S, 3)
         x_max_flat  = x_max.repeat_interleave(num_samples, dim=0)   # (B*S, 1)
@@ -403,7 +401,7 @@ class PushVIB3S_start_point_conditioned(nn.Module):
         start_point_raw_flat = start_point.repeat_interleave(num_samples, dim=0)  # (B*S, 3), normalized
 
         combined = torch.cat([start_feature_flat, goal_features_flat, start_point_flat], dim=1)
-        end_points_norm, _, _, _ = self._predict_from_mlp_output(self.mlp(combined), start_point_raw_flat)  # (B*S, 3)
+        end_points_norm, _ = self._predict_from_mlp_output(self.mlp(combined), start_point_raw_flat)  # (B*S, 3)
 
         x_mean_flat = x_mean.repeat_interleave(num_samples, dim=0)  # (B*S, 3)
         x_max_flat  = x_max.repeat_interleave(num_samples, dim=0)   # (B*S, 1)

@@ -2,75 +2,121 @@
 Generate "no diff goal" training data: synthetic samples where the object is
 already at its goal, so the model learns to predict zero displacement.
 
-For a random subset of the pickles found under a source data directory, each
-new sample is built from an existing one as follows:
-  - new start_pointcloud = new goal_pointcloud = original goal_pointcloud
-  - new start_position   = original end point (start_position + displacement)
-  - new displacement     = zeros (new start point == new end point)
+For a random subset of the pickles found under DATA_DIR (original, non object
+frame data), each new sample is built from an existing one. DATA_TYPE selects
+the source format:
 
-Results are written to a "no_diff_goal_data" subdirectory created inside the
-source data directory, mirroring the source's relative folder structure.
+  "real" (keys: start_pc, goal_pc, start_pose, goal_pose, displacement; poses
+  and displacement are {x, y, z} dicts):
+    - new start_pc     = new goal_pc   = original goal_pc
+    - new start_pose   = new goal_pose = original goal_pose
+    - new displacement = {x: 0, y: 0, z: 0}
 
-Works with either of the two known source layouts, since both expose the
-same 'start_pointcloud' / 'goal_pointcloud' / 'start_position' / 'displacement'
-keys consumed by dataset.py:
-  - /home/britton/PushVIBES/data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data
-  - /home/britton/PushVIBES/data/all_good_realsense_data/training
+  "sim" (keys: start_pointcloud, goal_pointcloud, global_goal_pointcloud,
+  start_position, displacement; positions are (1, 3) arrays and the goal
+  position is start_position + displacement):
+    - new start_pointcloud = new goal_pointcloud = original goal_pointcloud
+    - new start_position   = original goal position (start_position + displacement)
+    - new displacement     = zeros
+
+In both cases any other keys (e.g. context_pc, exposure_area,
+exposure_overlay_image, global_goal_pointcloud) are copied through unchanged.
+
+Results are written to OUTPUT_DIR, mirroring the source's relative folder
+structure, with "_no_diff" appended to each filename.
+
+The source data is never modified: source files are only opened read-only,
+every value is deep-copied before use, OUTPUT_DIR may not overlap DATA_DIR,
+and output files are opened in exclusive-create mode so nothing is overwritten.
 """
 
+import copy
 import os
 import pickle
 import random
 
 import numpy as np
 
-# Source data directory to process. Either of the two known layouts works:
-DATA_DIR = "/home/britton/PushVIBES/data/aug7_2025_new_data/processed_data_noisy_object_frame_with_old_and_new_data"
-# DATA_DIR = "/home/britton/PushVIBES/data/all_good_realsense_data/training"
+from utils import find_pickle_files
+
+# Source data format: "real" or "sim".
+DATA_TYPE = "real"
+
+# Source data directory to process (original frame, not object frame).
+DATA_DIRS = {
+    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/source_of_truth_original_frame/training",
+    "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/original_frame",
+    # "sim": "/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/original_frame" # old sim
+}
 
 # Fraction (0-1) of the source pickle files to convert into no-diff-goal data.
-RATIO_OF_DATA_TO_PROCESS = 0.5
+RATIO_OF_DATA_TO_PROCESS = 1.0
 
 # Random seed used when sampling which files to process.
 SEED = 14
 
-OUTPUT_DIRNAME = "no_diff_goal_data"
+OUTPUT_DIRS = {
+    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/original_frame/training",
+    "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/original_frame",
+    # "sim": "/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/no_diff/original_frame" # old sim
+}
+
+DATA_DIR = DATA_DIRS[DATA_TYPE]
+OUTPUT_DIR = OUTPUT_DIRS[DATA_TYPE]
+
+REQUIRED_KEYS = {
+    "real": ("start_pc", "goal_pc", "start_pose", "goal_pose", "displacement"),
+    "sim": ("start_pointcloud", "goal_pointcloud", "start_position", "displacement"),
+}
 
 
-def find_source_pickle_files(data_dir, output_dir):
-    """Recursively find .pickle/.pkl files under data_dir, skipping output_dir."""
-    output_dir_abs = os.path.abspath(output_dir)
-    file_list = []
-    for root, dirs, files in os.walk(data_dir):
-        if os.path.abspath(root) == output_dir_abs:
-            dirs[:] = []  # don't descend into the directory we're writing to
-            continue
-        for file in files:
-            if file.endswith((".pickle", ".pkl")):
-                file_list.append(os.path.join(root, file))
-    return file_list
+def _is_within(path, parent):
+    path = os.path.realpath(path)
+    parent = os.path.realpath(parent)
+    return os.path.commonpath([path, parent]) == parent
 
 
-def make_no_diff_goal_sample(data):
-    goal_pointcloud = data["goal_pointcloud"]
-    start_position = data["start_position"]
-    displacement = data["displacement"]
-
-    end_position = start_position + displacement
-
-    return {
-        "start_pointcloud": np.copy(goal_pointcloud),
-        "goal_pointcloud": np.copy(goal_pointcloud),
-        "start_position": end_position,
-        "displacement": np.zeros_like(displacement),
-    }
+def _make_real_no_diff_goal_sample(data):
+    # Deep copy so nothing in the new sample shares memory with the source.
+    new_data = copy.deepcopy(data)
+    new_data["start_pc"] = copy.deepcopy(data["goal_pc"])
+    new_data["goal_pc"] = copy.deepcopy(data["goal_pc"])
+    new_data["start_pose"] = copy.deepcopy(data["goal_pose"])
+    new_data["goal_pose"] = copy.deepcopy(data["goal_pose"])
+    new_data["displacement"] = {axis: 0.0 for axis in data["displacement"]}
+    return new_data
 
 
-def process_directory(data_dir, ratio_of_data_to_process=RATIO_OF_DATA_TO_PROCESS, seed=0):
-    output_dir = os.path.join(data_dir, OUTPUT_DIRNAME)
-    os.makedirs(output_dir, exist_ok=True)
+def _make_sim_no_diff_goal_sample(data):
+    # Deep copy so nothing in the new sample shares memory with the source.
+    new_data = copy.deepcopy(data)
+    new_data["start_pointcloud"] = np.copy(data["goal_pointcloud"])
+    new_data["goal_pointcloud"] = np.copy(data["goal_pointcloud"])
+    new_data["start_position"] = data["start_position"] + data["displacement"]
+    new_data["displacement"] = np.zeros_like(data["displacement"])
+    return new_data
 
-    source_files = sorted(find_source_pickle_files(data_dir, output_dir))
+
+def make_no_diff_goal_sample(data, data_type=DATA_TYPE):
+    missing = [k for k in REQUIRED_KEYS[data_type] if k not in data]
+    if missing:
+        raise KeyError(
+            f"Sample is missing required {data_type!r} keys: {missing} "
+            f"(found {sorted(data)}). Is DATA_TYPE set correctly?"
+        )
+
+    if data_type == "real":
+        return _make_real_no_diff_goal_sample(data)
+    return _make_sim_no_diff_goal_sample(data)
+
+
+def process_directory(data_dir, output_dir=OUTPUT_DIR, data_type=DATA_TYPE, ratio_of_data_to_process=RATIO_OF_DATA_TO_PROCESS, seed=0):
+    if data_type not in REQUIRED_KEYS:
+        raise ValueError(f"data_type must be one of {list(REQUIRED_KEYS)}, got {data_type!r}")
+    if _is_within(output_dir, data_dir) or _is_within(data_dir, output_dir):
+        raise ValueError(f"output_dir {output_dir} must not overlap data_dir {data_dir}")
+
+    source_files = sorted(find_pickle_files(data_dir))
     if not source_files:
         print(f"No pickle files found under {data_dir}")
         return
@@ -83,29 +129,34 @@ def process_directory(data_dir, ratio_of_data_to_process=RATIO_OF_DATA_TO_PROCES
 
     print(f"Found {len(source_files)} source pickle files under {data_dir}")
     print(
-        f"Processing {len(selected_files)} files "
+        f"Processing {len(selected_files)} {data_type} files "
         f"({ratio_of_data_to_process:.0%}) into {output_dir}"
     )
+
+    os.makedirs(output_dir, exist_ok=True)
 
     for src_path in selected_files:
         with open(src_path, "rb") as f:
             data = pickle.load(f)
 
-        new_data = make_no_diff_goal_sample(data)
+        new_data = make_no_diff_goal_sample(data, data_type)
 
         rel_path = os.path.relpath(src_path, data_dir)
         rel_dir, filename = os.path.split(rel_path)
         name, ext = os.path.splitext(filename)
 
         out_subdir = os.path.join(output_dir, rel_dir)
-        os.makedirs(out_subdir, exist_ok=True)
         out_path = os.path.join(out_subdir, f"{name}_no_diff{ext}")
+        if _is_within(out_path, data_dir):
+            raise ValueError(f"Refusing to write inside data_dir: {out_path}")
 
-        with open(out_path, "wb") as f:
+        os.makedirs(out_subdir, exist_ok=True)
+        # "xb" fails if the file already exists, so nothing is ever overwritten.
+        with open(out_path, "xb") as f:
             pickle.dump(new_data, f)
 
     print(f"Wrote {len(selected_files)} no-diff-goal pickles to {output_dir}")
 
 
 if __name__ == "__main__":
-    process_directory(DATA_DIR, ratio_of_data_to_process=RATIO_OF_DATA_TO_PROCESS, seed=SEED)
+    process_directory(DATA_DIR, OUTPUT_DIR, data_type=DATA_TYPE, ratio_of_data_to_process=RATIO_OF_DATA_TO_PROCESS, seed=SEED)
