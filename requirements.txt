@@ -1,0 +1,27 @@
+# PushVIB3S_start_point_conditioned environment for both encoders, incl. encoder_type="ptv3" (Python 3.12)
+#   python3.12 -m venv .ptv3_venv && source .ptv3_venv/bin/activate && pip install -r requirements.txt
+#
+# torch 2.10 (not PushVIBES' 2.14) because torch_scatter has no wheel for torch 2.14 and this machine
+# has no CUDA toolkit to build it. CUDA 13.0 build: RTX 5090 / sm_120 needs CUDA >= 12.8.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.10.0+cu130
+
+# torch_scatter must come from the PyG wheel server matching torch + CUDA
+--find-links https://data.pyg.org/whl/torch-2.10.0+cu130.html
+torch_scatter==2.1.2+pt210cu130
+
+# spconv's newest CUDA build is cu126; it runs on the CUDA 13 driver
+spconv-cu126==2.3.8
+
+# PTv3 deps
+timm==1.0.31
+addict==2.4.0
+
+# General ML / data (same as PushVIBES/requirements.txt)
+numpy>=2.0
+open3d==0.20.0
+scikit-learn
+matplotlib>=3.9
+contourpy>=1.2.1
+scipy>=1.13
+tqdm
