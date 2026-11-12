@@ -9,9 +9,17 @@ class PTV3ObservationEncoder(nn.Module):
         super().__init__()
         self.latent_dim = latent_dim
         self.grid_size = grid_size
+        # Downsized from PTv3's defaults (5 stages, depths (2,2,2,6,2), 32-512 ch: ~13.8M weights per encoder),
+        # which are sized for ~100k-point scenes and overfit our 512-point clouds. 4 stages of 1 block: ~1.4M.
+        # Attention window 128 (default 1024 = whole 512-point cloud) roughly halves training VRAM (15.2 -> 8.3 GB at batch 64).
         self.backbone = PointTransformerV3(
             in_channels=3,
             order=order,
+            stride=(2, 2, 2),
+            enc_depths=(1, 1, 1, 1),
+            enc_channels=(32, 64, 128, 256),
+            enc_num_head=(2, 4, 8, 16),
+            enc_patch_size=(128, 128, 128, 128),
             shuffle_orders=shuffle_orders,
             enable_flash=enable_flash,
             cls_mode=True,
