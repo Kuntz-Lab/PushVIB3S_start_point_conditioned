@@ -44,8 +44,8 @@ DATA_TYPE = "real"
 
 # Source data directory to process (original frame, not object frame).
 DATA_DIRS = {
-    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/source_of_truth_original_frame/training",
-    "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/original_frame",
+    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/source_of_truth_original_frame/test",
+    # "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/original_frame",
     # "sim": "/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/original_frame" # old sim
 }
 
@@ -56,8 +56,8 @@ RATIO_OF_DATA_TO_PROCESS = 1.0
 SEED = 14
 
 OUTPUT_DIRS = {
-    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/original_frame/training",
-    "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/original_frame",
+    "real": "/home/britton/data/PushVIBES/PushVIBES_realworld_data/no_diff/original_frame/test",
+    # "sim": "/home/britton/data/PushVIBES/aug7_new_sim_data/data_fixed/no_diff/original_frame",
     # "sim": "/home/britton/data/PushVIBES/og_w_occlusions_processed_data/less_than_25mm/no_diff/original_frame" # old sim
 }
 
@@ -66,7 +66,7 @@ OUTPUT_DIR = OUTPUT_DIRS[DATA_TYPE]
 
 REQUIRED_KEYS = {
     "real": ("start_pc", "goal_pc", "start_pose", "goal_pose", "displacement"),
-    "sim": ("start_pointcloud", "goal_pointcloud", "start_position", "displacement"),
+    # "sim": ("start_pointcloud", "goal_pointcloud", "start_position", "displacement"),
 }
 
 
